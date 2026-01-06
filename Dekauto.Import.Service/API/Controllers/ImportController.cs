@@ -30,20 +30,25 @@ namespace Dekauto.Import.Service.API.Controllers
                 var ld = files.ld;
                 var contract = files.contract;
                 var journal = files.journal;
-
+                var statement = files.statement;
+                
                 if (ld == null || ld.Length == 0 ||
                     contract == null || contract.Length == 0 ||
-                    journal == null || journal.Length == 0) throw new ArgumentNullException("Файл не найден");
+                    journal == null || journal.Length == 0 || 
+                    statement == null || statement.Length == 0) throw new ArgumentNullException("Файл не найден");
                 if (System.IO.Path.GetExtension(ld.FileName) != ".xlsx" ||
                     System.IO.Path.GetExtension(contract.FileName) != ".xlsx" || 
-                    System.IO.Path.GetExtension(journal.FileName) != ".xlsx") throw new FileLoadException(
+                    System.IO.Path.GetExtension(journal.FileName) != ".xlsx" ||
+                    System.IO.Path.GetExtension(statement.FileName) != ".xlsx") throw new FileLoadException(
                     "Неподдерживаемый формат файла. Пожалуйста, загрузите файл в формате .xlsx");
                 logger.LogInformation($"Начало работы с файлом: {ld.FileName}");
                 var studentsLD = await _importService.GetStudentsLD(ld);
                 logger.LogInformation($"Начало работы с файлом: {contract.FileName}");
                 var studentsOrder = await _importService.GetStudentsContract(contract, (List<Domain.Entities.Student>)studentsLD);
                 logger.LogInformation($"Начало работы с файлом: {journal.FileName}");
-                var students = await _importService.GetStudentsJournal(journal, (List<Domain.Entities.Student>)studentsOrder);
+                var studentsJournal = await _importService.GetStudentsJournal(journal, (List<Domain.Entities.Student>)studentsOrder);
+                logger.LogInformation($"Начало работы с файлом: {statement.FileName}");
+                var students = await _importService.GetStudentsStatement(statement,  (List<Domain.Entities.Student>) studentsJournal);
 
                 return Ok(students);
             }
