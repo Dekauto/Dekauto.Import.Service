@@ -168,7 +168,7 @@ namespace Dekauto.Import.Service.Domain.Services
                         return normalized.Contains("экспертное");
                     }
 
-                    int? academicHoursCol = null;
+                    int? audHoursCol = null;
                     var creditUnitsBySemesterCol = new Dictionary<int, int>();
 
                     for (int col = 1; col <= columnCount; col++)
@@ -179,9 +179,13 @@ namespace Dekauto.Import.Service.Domain.Services
                         var header2Lower = header2.ToLower();
                         var header3Lower = header3.ToLower();
 
-                        if (academicHoursCol == null && header2Lower.Contains("итого") && header2Lower.Contains("акад") && header2Lower.Contains("час") && ContainsExpertHeader(header3))
+                        // "Ауд." находится в 3 строке заголовков, под ним — нужные значения для дисциплин
+                        // Обычно это колонка в блоке "Итого ... часов"
+                        if (audHoursCol == null &&
+                            (header2Lower.Contains("итого") || header2Lower.Contains("всего")) &&
+                            Regex.IsMatch(header3Lower, @"\bауд\.?\b", RegexOptions.IgnoreCase))
                         {
-                            academicHoursCol = col;
+                            audHoursCol = col;
                             continue;
                         }
 
@@ -195,8 +199,8 @@ namespace Dekauto.Import.Service.Domain.Services
                         }
                     }
 
-                    if (academicHoursCol == null || creditUnitsBySemesterCol.Count == 0)
-                        throw new InvalidOperationException("Не удалось определить колонки учебного плана (Итого акад.часов/з.е. по семестрам)");
+                    if (audHoursCol == null || creditUnitsBySemesterCol.Count == 0)
+                        throw new InvalidOperationException("Не удалось определить колонки учебного плана (Ауд. часов/з.е. по семестрам)");
 
                     static string NormalizeDisciplineName(string? value)
                     {
@@ -297,9 +301,9 @@ namespace Dekauto.Import.Service.Domain.Services
                         if (isModuleRow)
                             continue;
 
-                        int? academicHours = null;
-                        if (TryGetIntCell(row, academicHoursCol.Value, out var hours))
-                            academicHours = hours;
+                        int? audHours = null;
+                        if (TryGetIntCell(row, audHoursCol.Value, out var hours))
+                            audHours = hours;
 
                         foreach (var kvp in creditUnitsBySemesterCol)
                         {
@@ -319,7 +323,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                 if (target == null)
                                     continue;
 
-                                target.AcademicHours = academicHours;
+                                target.AudHours = audHours;
                                 target.CreditUnits = ze;
                             }
                         }
