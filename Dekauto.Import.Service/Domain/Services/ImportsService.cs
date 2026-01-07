@@ -505,5 +505,322 @@ namespace Dekauto.Import.Service.Domain.Services
             } 
             return students;
         }
+
+        // Функция извлечения данных из ведомости
+        public async Task<IEnumerable<Student>> GetStudentsStatement(IFormFile statement, List<Student> students)
+        {
+            // Открытие потока обмеена данных
+            using (var stream = new MemoryStream())
+            {
+                await statement.CopyToAsync(stream);
+
+                // Распаковка файла Excel
+                using (var packege = new ExcelPackage(stream))
+                {
+                    // Заголовки для исключения из списка заголовков
+                    var excludedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        "№ п/п",
+                        "фио студента",
+                        "фио обучающегося",
+                        "фио",
+                        "обучается за счёт средств бюджета",
+                        "обучаюется за счёт средств бюджета",
+                        "обучается за счёт средств бюджета*",
+                        "обучаюется за счёт средств бюджета*",
+                        "средний балл",
+                        "примечание"
+                    };
+
+                    bool IsExcludedHeader(string? header)
+                    {
+                        if (string.IsNullOrWhiteSpace(header))
+                            return true;
+                        return excludedHeaders.Contains(header.Trim());
+                    }
+
+                    bool TryGetNumericScore(object? value, out double score)
+                    {
+                        score = default;
+                        if (value == null)
+                            return false;
+
+                        if (value is double d)
+                        {
+                            score = d;
+                            return true;
+                        }
+
+                        if (value is float f)
+                        {
+                            score = f;
+                            return true;
+                        }
+
+                        if (value is decimal dec)
+                        {
+                            score = (double)dec;
+                            return true;
+                        }
+
+                        if (value is int i)
+                        {
+                            score = i;
+                            return true;
+                        }
+
+                        if (value is long l)
+                        {
+                            score = l;
+                            return true;
+                        }
+
+                        var str = value.ToString()?.Trim();
+                        if (string.IsNullOrWhiteSpace(str))
+                            return false;
+
+                        if (double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out score))
+                            return true;
+
+                        
+                        var normalized = str.Replace(" ", string.Empty).Replace(",", ".");
+                        return double.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out score);
+                    }
+
+                    static string NormalizeStatementFio(string? value)
+                    {
+                        if (string.IsNullOrWhiteSpace(value))
+                            return string.Empty;
+                        return value.ToLower().Replace(" ", string.Empty).Replace(".", string.Empty);
+                    }
+
+                    static bool IsFioHeader(string? header)
+                    {
+                        if (string.IsNullOrWhiteSpace(header))
+                            return false;
+                        return header.ToLower().Contains("фио");
+                    }
+
+                    static string NormalizeHeaderText(string? value)
+                    {
+                        if (string.IsNullOrWhiteSpace(value))
+                            return string.Empty;
+
+                        var collapsed = Regex.Replace(value, @"\s+", " ").Trim();
+                        collapsed = Regex.Replace(collapsed, @"\(\s*зач[её]т\s*с\s*оценкой\s*\)", string.Empty, RegexOptions.IgnoreCase);
+                        return Regex.Replace(collapsed, @"\s+", " ").Trim();
+                    }
+
+                    // Проверка файла на наличие листов
+                    if (packege.Workbook.Worksheets.Count == 0)
+                        throw new InvalidOperationException("Загруженный файл не содержит листов");
+
+                    foreach (var worksheet in packege.Workbook.Worksheets)
+                    {
+                        if (worksheet?.Dimension == null)
+                            continue;
+
+                        // Базовые данные листов
+                        var columnCount = worksheet.Dimension.Columns;
+                        var rowCount = worksheet.Dimension.Rows;
+
+                        string GetMergedText(int row, int col)
+                        {
+                            var mergedAddress = worksheet.MergedCells[row, col];
+                            if (!string.IsNullOrWhiteSpace(mergedAddress))
+                                return worksheet.Cells[mergedAddress].First().Text;
+                            return worksheet.Cells[row, col].Text;
+                        }
+
+                        static bool TryExtractFirstInt(string? value, out int number)
+                        {
+                            number = default;
+                            if (string.IsNullOrWhiteSpace(value))
+                                return false;
+
+                            var match = Regex.Match(value, @"\d+");
+                            if (!match.Success)
+                                return false;
+
+                            return int.TryParse(match.Value, out number);
+                        }
+
+                        short? sheetSemester = null;
+                        {
+                            var sessionRowText = NormalizeHeaderText(GetMergedText(3, 1)).ToLower();
+                            var isAutumnWinter = sessionRowText.Contains("осенне-зимняя") || sessionRowText.Contains("осенне зимняя");
+                            var isSpringSummer = sessionRowText.Contains("весенне-летняя") || sessionRowText.Contains("весенне летняя");
+
+                            var courseCellText = worksheet.Cells[4, 3].Value?.ToString();
+                            if (TryExtractFirstInt(courseCellText, out var courseNum) && courseNum > 0)
+                            {
+                                var sem = courseNum * 2;
+                                if (isAutumnWinter)
+                                    sem -= 1;
+
+                                // Если сессия не распознана, всё равно можно определить семестр по формуле для весенне-летней,
+                                // но лучше оставлять null, чтобы не подставлять потенциально неверные данные.
+                                if (isAutumnWinter || isSpringSummer)
+                                    sheetSemester = (short)sem;
+                            }
+                        }
+
+                        short? sheetYear = null;
+                        {
+                            var headerRowText = NormalizeHeaderText(GetMergedText(2, 1));
+                            if (TryExtractFirstInt(headerRowText, out var yearCandidate) && yearCandidate >= 1900 && yearCandidate <= 2100)
+                            {
+                                // TryExtractFirstInt найдёт первое число; в строке может быть № ведомости.
+                                // Поэтому ищем именно год как 4 цифры.
+                                var yearMatch = Regex.Match(headerRowText, @"\b(19\d{2}|20\d{2}|2100)\b");
+                                if (yearMatch.Success && short.TryParse(yearMatch.Value, out var parsedYear))
+                                    sheetYear = parsedYear;
+                            }
+                            else
+                            {
+                                var yearMatch = Regex.Match(headerRowText, @"\b(19\d{2}|20\d{2}|2100)\b");
+                                if (yearMatch.Success && short.TryParse(yearMatch.Value, out var parsedYear))
+                                    sheetYear = parsedYear;
+                            }
+                        }
+
+                        var headers = new List<string>();
+                        var topHeaders = new List<string>();
+
+                        // Извлечение заголовков из объединённых 6-7 строк
+                        for (int col = 1; col <= columnCount; col++)
+                        {
+                            var top = NormalizeHeaderText(GetMergedText(6, col));
+                            var bottom = NormalizeHeaderText(GetMergedText(7, col));
+
+                            topHeaders.Add(top);
+
+                            string combined;
+                            if (string.IsNullOrWhiteSpace(top))
+                                combined = bottom;
+                            else if (string.IsNullOrWhiteSpace(bottom))
+                                combined = top;
+                            else
+                                combined = $"{top} {bottom}";
+
+                            headers.Add(NormalizeHeaderText(combined));
+                        }
+
+                        var studentRows = new Dictionary<Student, int>();
+
+                        foreach (var student in students)
+                        {
+                            // Фамилия и имя студента в таблице
+                            var surname = student.Surname ?? string.Empty;
+                            var nameInitial = string.IsNullOrWhiteSpace(student.Name) ? string.Empty : student.Name.Substring(0, 1);
+                            var patronymicInitial = string.IsNullOrWhiteSpace(student.Patronymic) ? string.Empty : student.Patronymic.Substring(0, 1);
+
+                            var keyFi = NormalizeStatementFio($"{surname}{nameInitial}");
+                            var keyFip = NormalizeStatementFio($"{surname}{nameInitial}{patronymicInitial}");
+                            // Перебор начиная с 8 строки
+                            for (int row = 8; row <= rowCount; row++)
+                            {
+                                // Поиск студентов из списка
+                                for (int col = 1; col <= columnCount; col++)
+                                {
+                                    var header = headers[col - 1];
+                                    var cellValue = worksheet.Cells[row, col].Value ?? "";
+
+                                    if (!IsFioHeader(header))
+                                        continue;
+
+                                    var cellfi = NormalizeStatementFio(cellValue.ToString());
+                                    if (cellfi.Contains(keyFip) || cellfi.Contains(keyFi))
+                                    {
+                                        studentRows[student] = row;
+                                        break;
+                                    }
+                                    if (studentRows.ContainsKey(student))
+                                        break;
+                                }
+                            }
+                        }
+
+                        // Обработка данных для студентов
+                        foreach (var student in students)
+                        {
+                            if (!studentRows.TryGetValue(student, out int studentRow))
+                                continue;
+
+                            for (int col = 1; col <= columnCount; col++)
+                            {
+                                var header = headers[col - 1];
+                                var headerLower = header.ToLower();
+
+                                if (IsExcludedHeader(header))
+                                    continue;
+
+                                var cellValue = worksheet.Cells[studentRow, col].Value;
+                                if (!TryGetNumericScore(cellValue, out var score))
+                                {
+                                    var cellText = cellValue?.ToString()?.Trim() ?? string.Empty;
+                                    var normalized = cellText.ToLower().Replace(".", string.Empty).Replace(" ", string.Empty);
+                                    if (normalized.Contains("неявл"))
+                                    {
+                                        score = 0;
+                                    }
+                                    else
+                                    {
+                                        continue;
+                                    }
+                                }
+
+                                var disciplineName = (topHeaders[col - 1] ?? "").Trim();
+                                if (string.IsNullOrWhiteSpace(disciplineName))
+                                    disciplineName = header.Trim();
+
+                                disciplineName = NormalizeHeaderText(disciplineName);
+
+                                var isCourseWork = disciplineName.ToLower().Contains("курсовая работа");
+                                if (isCourseWork)
+                                    disciplineName = string.Empty;
+
+                                if (!isCourseWork)
+                                {
+                                    if (IsExcludedHeader(disciplineName) || excludedHeaders.Contains(disciplineName))
+                                        continue;
+                                }
+
+                                logger.LogInformation($"Работа с ячейкой: [{col},{studentRow}]; столбец {headerLower}");
+
+                                var existing = isCourseWork
+                                    ? student.DisciplineResults.FirstOrDefault(x =>
+                                        x.ControlType != null &&
+                                        x.ControlType.Equals("курсовая", StringComparison.OrdinalIgnoreCase))
+                                    : student.DisciplineResults.FirstOrDefault(x =>
+                                        x.DisciplineName != null &&
+                                        x.DisciplineName.Equals(disciplineName, StringComparison.OrdinalIgnoreCase));
+
+                                if (existing == null)
+                                {
+                                    student.DisciplineResults.Add(new StudentDisciplineResult
+                                    {
+                                        DisciplineName = string.IsNullOrWhiteSpace(disciplineName) ? null : disciplineName,
+                                        Score = score,
+                                        Semester = sheetSemester,
+                                        Year = sheetYear,
+                                        ControlType = isCourseWork ? "курсовая" : null
+                                    });
+                                }
+                                else
+                                {
+                                    existing.Score = score;
+                                    existing.Semester = sheetSemester;
+                                    existing.Year = sheetYear;
+                                    if (isCourseWork)
+                                        existing.ControlType = "курсовая";
+                                }
+                            }
+                        }
+                    }
+                }               
+            }
+            return students;
+        }
     }
 }
