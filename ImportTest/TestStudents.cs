@@ -39,7 +39,8 @@ namespace ImportTest
                 ld = CreateMockFile("Файл личных дел.xlsx"),
                 contract = CreateMockFile("Файл договоров.xlsx"),
                 journal = CreateMockFile("Файл журнала.xlsx"),
-                statement = CreateMockFile("Файл ведомости.xlsx")
+                statement = CreateMockFile("Файл ведомости.xlsx"),
+                plan = CreateMockFile("Файл учебного плана.xlsx")
             };
             
             var students = new List<Student>();
@@ -48,6 +49,7 @@ namespace ImportTest
             importService.Setup(s => s.GetStudentsContract(It.IsAny<IFormFile>(), students)).ReturnsAsync(students);
             importService.Setup(s => s.GetStudentsJournal(It.IsAny<IFormFile>(), students)).ReturnsAsync(students);
             importService.Setup(s => s.GetStudentsStatement(It.IsAny<IFormFile>(), students)).ReturnsAsync(students);
+            importService.Setup(s => s.GetStudentsEducationPlan(It.IsAny<IFormFile>(), students)).ReturnsAsync(students);
 
             controller.ControllerContext = new ControllerContext();
 
@@ -75,7 +77,8 @@ namespace ImportTest
                 ld = CreateMockFile("Файл личных дел.xlsx"),
                 contract = CreateMockFile("Файл договоров.xlsx"),
                 journal = CreateMockFile("Файл журнала.xlsx"),
-                statement = CreateMockFile("Файл ведомости.xlsx")
+                statement = CreateMockFile("Файл ведомости.xlsx"),
+                plan = CreateMockFile("Файл учебного плана.xlsx")
             };
 
             var students = new List<Student>();
@@ -84,6 +87,7 @@ namespace ImportTest
             importService.Setup(s => s.GetStudentsContract(It.IsAny<IFormFile>(), students)).ThrowsAsync(new ArgumentNullException());
             importService.Setup(s => s.GetStudentsJournal(It.IsAny<IFormFile>(), students)).ThrowsAsync(new ArgumentNullException());
             importService.Setup(s => s.GetStudentsStatement(It.IsAny<IFormFile>(), students)).ThrowsAsync(new ArgumentNullException());
+            importService.Setup(s => s.GetStudentsEducationPlan(It.IsAny<IFormFile>(), students)).ThrowsAsync(new ArgumentNullException());
 
             controller.ControllerContext = new ControllerContext();
 
@@ -107,7 +111,8 @@ namespace ImportTest
                 ld = CreateMockFile("Файл личных дел.xlsx"),
                 contract = CreateMockFile("Файл договоров.xlsx"),
                 journal = CreateMockFile("Файл журнала.xlsx"),
-                statement = CreateMockFile("Файл ведомости.xlsx")
+                statement = CreateMockFile("Файл ведомости.xlsx"),
+                plan = CreateMockFile("Файл учебного плана.xlsx")
             };
 
             var students = new List<Student>();
@@ -116,6 +121,7 @@ namespace ImportTest
             importService.Setup(s => s.GetStudentsContract(It.IsAny<IFormFile>(), students)).ThrowsAsync(new FileLoadException());
             importService.Setup(s => s.GetStudentsJournal(It.IsAny<IFormFile>(), students)).ThrowsAsync(new FileLoadException());
             importService.Setup(s => s.GetStudentsStatement(It.IsAny<IFormFile>(), students)).ThrowsAsync(new FileLoadException());
+            importService.Setup(s => s.GetStudentsEducationPlan(It.IsAny<IFormFile>(), students)).ThrowsAsync(new FileLoadException());
 
             controller.ControllerContext = new ControllerContext();
 
@@ -139,7 +145,8 @@ namespace ImportTest
                 ld = CreateMockFile("Файл личных дел.xlsx"),
                 contract = CreateMockFile("Файл договоров.xlsx"),
                 journal = CreateMockFile("Файл журнала.xlsx"),
-                statement = CreateMockFile("Файл ведомости.xlsx")
+                statement = CreateMockFile("Файл ведомости.xlsx"),
+                plan = CreateMockFile("Файл учебного плана.xlsx")
             };
 
             var students = new List<Student>();
@@ -148,6 +155,7 @@ namespace ImportTest
             importService.Setup(s => s.GetStudentsContract(It.IsAny<IFormFile>(), students)).ThrowsAsync(new InvalidOperationException());
             importService.Setup(s => s.GetStudentsJournal(It.IsAny<IFormFile>(), students)).ThrowsAsync(new InvalidOperationException());
             importService.Setup(s => s.GetStudentsStatement(It.IsAny<IFormFile>(), students)).ThrowsAsync(new InvalidOperationException());
+            importService.Setup(s => s.GetStudentsEducationPlan(It.IsAny<IFormFile>(), students)).ThrowsAsync(new InvalidOperationException());
 
             controller.ControllerContext = new ControllerContext();
 
@@ -171,7 +179,8 @@ namespace ImportTest
                 ld = CreateMockFile("Файл личных дел.xlsx"),
                 contract = CreateMockFile("Файл договоров.xlsx"),
                 journal = CreateMockFile("Файл журнала.xlsx"),
-                statement = CreateMockFile("Файл ведомости.xlsx")
+                statement = CreateMockFile("Файл ведомости.xlsx"),
+                plan = CreateMockFile("Файл учебного плана.xlsx")
             };
 
             var students = new List<Student>();
@@ -180,6 +189,7 @@ namespace ImportTest
             importService.Setup(s => s.GetStudentsContract(It.IsAny<IFormFile>(), students)).ThrowsAsync(new Exception());
             importService.Setup(s => s.GetStudentsJournal(It.IsAny<IFormFile>(), students)).ThrowsAsync(new Exception());
             importService.Setup(s => s.GetStudentsStatement(It.IsAny<IFormFile>(), students)).ThrowsAsync(new Exception());
+            importService.Setup(s => s.GetStudentsEducationPlan(It.IsAny<IFormFile>(), students)).ThrowsAsync(new Exception());
 
             controller.ControllerContext = new ControllerContext();
 
