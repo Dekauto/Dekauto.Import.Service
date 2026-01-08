@@ -8,7 +8,7 @@ namespace Dekauto.Import.Service.Domain.Entities
         public short? Year { get; set; }
         public string? ControlType { get; set; }
 
-        public int? AudHours { get; set; }
+        public double? AudHours { get; set; }
         public double? CreditUnits { get; set; }
     }
 }
