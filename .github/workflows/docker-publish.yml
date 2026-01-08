@@ -29,7 +29,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/dekauto_import_service
           tags: |
 
-            type=raw,value=latest-dev
+            type=raw,value=latest
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
