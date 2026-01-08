@@ -8,5 +8,7 @@
         public IFormFile? journal { get; set; } // Журнал зачеток
         public IFormFile? statement { get; set; } // Ведомость
         public IFormFile? plan { get; set; } // Учебный план
+        public IFormFile? studentCard { get; set; } // Карточка студента (для приложения диплома)
+
     }
 }

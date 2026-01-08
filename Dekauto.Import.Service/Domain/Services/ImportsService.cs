@@ -1120,7 +1120,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                     student.DisciplineResults.Add(new StudentDisciplineResult
                                     {
                                         DisciplineName = string.IsNullOrWhiteSpace(disciplineName) ? null : disciplineName,
-                                        Score = score,
+                                        Score = score.ToString(),
                                         Semester = sheetSemester,
                                         Year = sheetYear,
                                         ControlType = controlType
@@ -1128,7 +1128,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                 }
                                 else
                                 {
-                                    existing.Score = score;
+                                    existing.Score = score.ToString();
                                     existing.Semester = sheetSemester;
                                     existing.Year = sheetYear;
                                     if (controlType != null)
