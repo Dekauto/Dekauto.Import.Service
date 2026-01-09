@@ -1176,12 +1176,42 @@ namespace Dekauto.Import.Service.Domain.Services
                     }
 
                     // Добавление полей-дат вручную:
-                    diplomaData.BirthdayDate = DateOnly.FromDateTime((DateTime)worksheet.Cells[6, 5].Value);
-                    diplomaData.EducationReceivedDate = DateOnly.FromDateTime((DateTime)worksheet.Cells[42, 8].Value);
+                    diplomaData.BirthdayDate = ObjectToDateOnly(worksheet.Cells[6, 5].Value);
+                    diplomaData.EducationReceivedDate = ObjectToDateOnly(worksheet.Cells[42, 8].Value);
+
+
                 }
             }
 
             return diplomaData;
+        }
+
+        /// <summary>
+        /// Метод, пытающийся вытащить дату из произвольного объекта или выдает ошибку.
+        /// Примечание: метод может не использоваться во всех местах ImportService - где-то может 
+        /// остаться хвост из такой же логики, без использования этого централизированного метода.
+        /// </summary>
+        /// <param name="obj"></param>
+        /// <returns>DateOnly</returns>
+        /// <exception cref="FormatException"></exception>
+        private DateOnly ObjectToDateOnly(object obj)
+        {
+            if (obj is DateTime date)
+                return DateOnly.FromDateTime(date);
+            else
+            {
+                string dateStr = obj.ToString().Trim();
+                if (DateTime.TryParseExact(
+                    dateStr,
+                    "dd.MM.yyyy",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out DateTime parsedDate))
+                {
+                    return DateOnly.FromDateTime(parsedDate);
+                }
+                else throw new FormatException($"Не удалось распознать дату: {dateStr}");
+            }
         }
     }
 }
