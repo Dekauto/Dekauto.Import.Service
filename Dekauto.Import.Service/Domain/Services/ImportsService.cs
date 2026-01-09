@@ -347,7 +347,7 @@ namespace Dekauto.Import.Service.Domain.Services
                         return normalized switch
                         {
                             "эк" => "экзамен",
-                            "к" => "контрольная",
+                            "к" => "контрольная работа",
                             "кр" => "курсовая",
                             "за" => "зачёт",
                             "зао" => "зачёт с оценкой",
@@ -906,6 +906,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
                         var collapsed = Regex.Replace(value, @"\s+", " ").Trim();
                         collapsed = Regex.Replace(collapsed, @"\(\s*зач[её]т\s*с\s*оценкой\s*\)", string.Empty, RegexOptions.IgnoreCase);
+                        collapsed = Regex.Replace(collapsed, @"\(\s*Итоговая\s+контрольная\s+работа\s*\)", string.Empty, RegexOptions.IgnoreCase);
                         return Regex.Replace(collapsed, @"\s+", " ").Trim();
                     }
 
