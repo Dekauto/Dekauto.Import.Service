@@ -1,4 +1,5 @@
 ﻿using Dekauto.Import.Service.Domain.Entities;
+using Dekauto.Import.Service.Domain.Entities.DTO;
 
 namespace Dekauto.Import.Service.Domain.Interfaces
 {
@@ -10,7 +11,11 @@ namespace Dekauto.Import.Service.Domain.Interfaces
         Task<IEnumerable<Student>> GetStudentsStatement(IFormFile statement, List<Student> studentsJournal);
         Task<IEnumerable<Student>> GetStudentsEducationPlan(IFormFile plan, List<Student> students);
 
-        // Отдельный метод парсинга карточки студента для формирования данных для приложения диплома
-        Task<Student> GetStudentCard(IFormFile studentCard);
+        /// <summary>
+        /// Отдельный метод парсинга карточки студента для формирования данных для приложения диплома
+        /// </summary>
+        /// <param name="studentCard">Приходящий по API файл карточки студента для парсинга.</param>
+        /// <returns></returns>
+        Task<DiplomaSupplementData> GetStudentCardAsync(IFormFile studentCard);
     }
 }

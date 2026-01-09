@@ -1,4 +1,5 @@
 ﻿using Dekauto.Import.Service.Domain.Entities;
+using Dekauto.Import.Service.Domain.Entities.DTO;
 using Dekauto.Import.Service.Domain.Interfaces;
 using OfficeOpenXml;
 using System.Globalization;
@@ -1145,9 +1146,31 @@ namespace Dekauto.Import.Service.Domain.Services
             return students;
         }
 
-        public Task<Student> GetStudentCard(IFormFile studentCard)
+        public async Task<DiplomaSupplementData> GetStudentCardAsync(IFormFile studentCard)
         {
-            throw new NotImplementedException();
+            var student = new Student();
+            using (var stream = new MemoryStream())
+            {
+                await studentCard.CopyToAsync(stream);
+                using (var package = new ExcelPackage(stream))
+                {
+                    // Начальный скан документа
+                    var worksheet = package.Workbook.Worksheets[0] ?? throw new InvalidOperationException("Загруженный файл не содержит листов");
+
+                    var columnCount = worksheet.Dimension.Columns;
+                    var rowCount = worksheet.Dimension.Rows;
+
+                    // Получаем все заголовки (текстом)
+                    var headers = new List<string>();
+                    for (int col = 1; col <= columnCount; col++)
+                        headers.Add(worksheet.Cells[1, col].Text);
+
+                    logger.LogDebug(headers.ToString());
+
+                }
+            }
+
+            return null;
         }
     }
 }
