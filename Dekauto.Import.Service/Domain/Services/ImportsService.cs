@@ -1148,7 +1148,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
         public async Task<DiplomaSupplementData> GetStudentCardAsync(IFormFile studentCard)
         {
-            var student = new Student();
+            var diplomaData = new DiplomaSupplementData();
             using (var stream = new MemoryStream())
             {
                 await studentCard.CopyToAsync(stream);
@@ -1157,20 +1157,31 @@ namespace Dekauto.Import.Service.Domain.Services
                     // Начальный скан документа
                     var worksheet = package.Workbook.Worksheets[0] ?? throw new InvalidOperationException("Загруженный файл не содержит листов");
 
-                    var columnCount = worksheet.Dimension.Columns;
-                    var rowCount = worksheet.Dimension.Rows;
+                    // Словарь констант, в который записываются все фиксированные текстовые ячейки и соответствующие им поля в модели
+                    // Значения пишутся с большой буквы
+                    var mappings = new Dictionary<(int row, int col), Action<string>>
+                    {
+                        [(3, 2)] = val => diplomaData.Surname = Char.ToUpper(val[0]) + val.Substring(1),
+                        [(4, 2)] = val => diplomaData.Name = Char.ToUpper(val[0]) + val.Substring(1),
+                        [(5, 2)] = val => diplomaData.Patronymic = Char.ToUpper(val[0]) + val.Substring(1),
+                        [(40, 4)] = val => diplomaData.EducationReceived = Char.ToUpper(val[0]) + val.Substring(1)
+                    };
 
-                    // Получаем все заголовки (текстом)
-                    var headers = new List<string>();
-                    for (int col = 1; col <= columnCount; col++)
-                        headers.Add(worksheet.Cells[1, col].Text);
+                    // Пробежка по текстовым ячейкам
+                    foreach (var ((row, col), setter) in mappings)
+                    {
+                        var cell = worksheet.Cells[row, col];
+                        logger.LogDebug($"Значение ячейки [{row}, {col}]: {cell.Text}");
+                        setter(cell.Text);
+                    }
 
-                    logger.LogDebug(headers.ToString());
-
+                    // Добавление полей-дат вручную:
+                    diplomaData.BirthdayDate = DateOnly.FromDateTime((DateTime)worksheet.Cells[6, 5].Value);
+                    diplomaData.EducationReceivedDate = DateOnly.FromDateTime((DateTime)worksheet.Cells[42, 8].Value);
                 }
             }
 
-            return null;
+            return diplomaData;
         }
     }
 }
