@@ -347,7 +347,7 @@ namespace Dekauto.Import.Service.Domain.Services
                         return normalized switch
                         {
                             "эк" => "экзамен",
-                            "к" => "контрольная",
+                            "к" => "контрольная работа",
                             "кр" => "курсовая",
                             "за" => "зачёт",
                             "зао" => "зачёт с оценкой",
