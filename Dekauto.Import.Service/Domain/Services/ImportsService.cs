@@ -949,10 +949,21 @@ namespace Dekauto.Import.Service.Domain.Services
                             var isAutumnWinter = sessionRowText.Contains("осенне-зимняя") || sessionRowText.Contains("осенне зимняя");
                             var isSpringSummer = sessionRowText.Contains("весенне-летняя") || sessionRowText.Contains("весенне летняя");
 
-                            var courseCellText = worksheet.Cells[4, 3].Value?.ToString();
-                            if (TryExtractFirstInt(courseCellText, out var courseNum) && courseNum > 0)
+                            // Поиск номера курса в 4-й строке по всем столбцам
+                            int? courseNum = null;
+                            for (int col = 1; col <= columnCount; col++)
                             {
-                                var sem = courseNum * 2;
+                                var courseCellText = GetMergedText(4, col);
+                                if (TryExtractFirstInt(courseCellText, out var num) && num >= 1 && num <= 6)
+                                {
+                                    courseNum = num;
+                                    break;
+                                }
+                            }
+
+                            if (courseNum.HasValue && courseNum.Value > 0)
+                            {
+                                var sem = courseNum.Value * 2;
                                 if (isAutumnWinter)
                                     sem -= 1;
 
