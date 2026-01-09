@@ -1,7 +1,6 @@
 ﻿using Dekauto.Import.Service.Domain.Entities;
 using Dekauto.Import.Service.Domain.Interfaces;
 using OfficeOpenXml;
-using System.Diagnostics.Contracts;
 using System.Globalization;
 using System.Text.RegularExpressions;
 
@@ -18,10 +17,10 @@ namespace Dekauto.Import.Service.Domain.Services
         }
         public async Task<IEnumerable<Student>> GetStudentsContract(IFormFile contract, List<Student> students)
         {
-            using (var stream = new MemoryStream()) 
+            using (var stream = new MemoryStream())
             {
                 await contract.CopyToAsync(stream);
-                using (var packege = new ExcelPackage(stream)) 
+                using (var packege = new ExcelPackage(stream))
                 {
                     var worksheet = packege.Workbook.Worksheets[0] ?? throw new InvalidOperationException("Загруженный файл не содержит листов");
 
@@ -34,10 +33,10 @@ namespace Dekauto.Import.Service.Domain.Services
                         headers.Add(worksheet.Cells[1, col].Text);
                     }
                     if (students.Count == 0 || students == null) throw new ArgumentNullException("Студенты отсутствуют в таблице личных дел");
-                    foreach (var student in students) 
+                    foreach (var student in students)
                     {
                         string fio = $"{student.Surname}{student.Name}{student.Patronymic}".ToLower();
-                        for (int row = 2; row <= rowCount; row++) 
+                        for (int row = 2; row <= rowCount; row++)
                         {
                             bool isCurrentStudent = false;
                             string enrollementOrderDatePattern = @"\d{2}\.\d{2}\.\d{4}";
@@ -53,26 +52,26 @@ namespace Dekauto.Import.Service.Domain.Services
                                     if (cellfio == fio)
                                     {
                                         isCurrentStudent = true;
-                                        break; 
+                                        break;
                                     }
                                 }
                             }
-                            for (int col = 1; col <= columnCount; col++) 
+                            for (int col = 1; col <= columnCount; col++)
                             {
                                 var header = headers[col - 1];
                                 var cellValue = worksheet.Cells[row, col].Value ?? "";
 
                                 logger.LogInformation($"Работа с ячейкой: [{col},{row}]; столбец {header}");
 
-                                switch (header.ToLower()) 
+                                switch (header.ToLower())
                                 {
                                     case "дата":
-                                        if (isCurrentStudent == true) 
+                                        if (isCurrentStudent == true)
                                         {
-                                            if (cellValue is DateTime excelDate) 
+                                            if (cellValue is DateTime excelDate)
                                             {
                                                 student.EducationRelationDate = DateOnly.FromDateTime(excelDate);
-                                            } 
+                                            }
                                             else
                                             {
                                                 string dateStr = cellValue.ToString().Trim();
@@ -91,13 +90,15 @@ namespace Dekauto.Import.Service.Domain.Services
                                             student.EducationFinishYear = (short)(student.EducationStartYear + student.EducationTime);
                                         }
                                         break;
-                                    case "№ договора": case "номер договора":
+                                    case "№ договора":
+                                    case "номер договора":
                                         if (isCurrentStudent == true)
                                         {
                                             student.EducationRelationNum = cellValue.ToString();
                                         }
                                         break;
-                                    case "№ приказа о зачислении": case "номер приказа о зачислении":
+                                    case "№ приказа о зачислении":
+                                    case "номер приказа о зачислении":
                                         if (isCurrentStudent == true)
                                         {
                                             string dateStr = Regex.Match(cellValue.ToString().Trim(), enrollementOrderDatePattern).ToString();
@@ -339,11 +340,11 @@ namespace Dekauto.Import.Service.Domain.Services
                             return string.Empty;
 
                         var normalized = value.Trim().ToLower();
-                        
+
                         // Эк КР -> экзамен, курсовая работа
                         if (normalized.Contains("эк") && normalized.Contains("кр"))
                             return "экзамен, курсовая";
-                        
+
                         return normalized switch
                         {
                             "эк" => "экзамен",
@@ -444,7 +445,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     foreach (var student in students)
                     {
                         string fio = $"{student.Surname}{student.Name}{student.Patronymic}".ToLower();
-                        
+
                         for (int row = 4; row <= rowCount; row++)
                         {
                             bool isCurrentStudent = false;
@@ -470,9 +471,9 @@ namespace Dekauto.Import.Service.Domain.Services
 
                                 logger.LogInformation($"Работа с ячейкой: [{col},{row}]; столбец {header}");
 
-                                switch (header.ToLower()) 
+                                switch (header.ToLower())
                                 {
-                                    case "№ студ.билета и зачетной книжки": 
+                                    case "№ студ.билета и зачетной книжки":
                                     case "№ студ.билета":
                                     case "№ зачетной книжки":
                                     case "№ зачетки":
@@ -497,10 +498,10 @@ namespace Dekauto.Import.Service.Domain.Services
         public async Task<IEnumerable<Student>> GetStudentsLD(IFormFile ld)
         {
             var students = new List<Student>();
-            using (var stream = new MemoryStream()) 
+            using (var stream = new MemoryStream())
             {
                 await ld.CopyToAsync(stream);
-                using (var package = new ExcelPackage(stream)) 
+                using (var package = new ExcelPackage(stream))
                 {
                     var worksheet = package.Workbook.Worksheets[0] ?? throw new InvalidOperationException("Загруженный файл не содержит листов");
 
@@ -508,12 +509,12 @@ namespace Dekauto.Import.Service.Domain.Services
                     var rowCount = worksheet.Dimension.Rows;
 
                     var headers = new List<string>();
-                    for (int col = 1; col <= columnCount; col++) 
+                    for (int col = 1; col <= columnCount; col++)
                     {
                         headers.Add(worksheet.Cells[1, col].Text);
                     }
 
-                    for (int row = 2; row <= rowCount; row++) 
+                    for (int row = 2; row <= rowCount; row++)
                     {
                         var student = new Student();
                         string courseOfTraining = string.Empty;
@@ -531,9 +532,9 @@ namespace Dekauto.Import.Service.Domain.Services
                         student.MaritalStatus = false; // Отношения по умолчанию отсутствуют
 
 
-                        for (int col = 1; col <= columnCount; col++) 
+                        for (int col = 1; col <= columnCount; col++)
                         {
-                            var header = headers[col-1];
+                            var header = headers[col - 1];
                             var cellValue = worksheet.Cells[row, col].Value ?? "";
 
                             string indexPattern = @"\b\d{6}\b";
@@ -557,16 +558,16 @@ namespace Dekauto.Import.Service.Domain.Services
                                     break;
                             }
 
-                            switch (header.ToLower()) 
+                            switch (header.ToLower())
                             {
                                 case "фио":
                                     string pattern = @"\S+";
                                     MatchCollection fio = Regex.Matches(cellValue.ToString().ToLower(), pattern);
-                                    string name = $"{fio[1].ToString().Substring(0,1).ToUpper()}{fio[1].ToString().Substring(1)}";
+                                    string name = $"{fio[1].ToString().Substring(0, 1).ToUpper()}{fio[1].ToString().Substring(1)}";
                                     student.Name = name;
                                     string surname = $"{fio[0].ToString().Substring(0, 1).ToUpper()}{fio[0].ToString().Substring(1)}";
                                     student.Surname = surname;
-                                    if (fio.Count > 2) 
+                                    if (fio.Count > 2)
                                     {
                                         string patronymic = $"{fio[2].ToString().Substring(0, 1).ToUpper()}{fio[2].ToString().Substring(1)}";
                                         student.Patronymic = patronymic;
@@ -574,7 +575,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                     else student.Patronymic = "";
                                     break;
                                 case "пол":
-                                    if (cellValue.ToString().ToLower() == "мужской") student.Gender = true; 
+                                    if (cellValue.ToString().ToLower() == "мужской") student.Gender = true;
                                     else student.Gender = false;
                                     break;
                                 case "дата рождения":
@@ -699,10 +700,11 @@ namespace Dekauto.Import.Service.Domain.Services
                                     break;
 
                                 case "адрес проживания":
-                                    if (cellValue.ToString() != "") { 
+                                    if (cellValue.ToString() != "")
+                                    {
                                         student.AddressResidentialIndex = Regex.Match(cellValue.ToString(), indexPattern).ToString();
                                         student.AddressResidentialCity = Regex.Match(cellValue.ToString(), cityPattern).Groups[1].ToString();
-                                        switch(Regex.Match(cellValue.ToString(), addressTypePattern).Groups[1].ToString()) 
+                                        switch (Regex.Match(cellValue.ToString(), addressTypePattern).Groups[1].ToString())
                                         {
                                             case "г":
                                                 student.AddressResidentialType = "город";
@@ -748,7 +750,8 @@ namespace Dekauto.Import.Service.Domain.Services
                                     break;
                                 case "дата выдачи":
                                     if (cellValue is DateTime exDate) student.EducationReceivedDate = DateOnly.FromDateTime(exDate);
-                                    else { 
+                                    else
+                                    {
                                         string dateStr = cellValue.ToString().Trim();
                                         if (DateTime.TryParseExact(
                                             dateStr,
@@ -775,7 +778,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                     student.OOName = cellValue.ToString();
                                     break;
                             }
-                            if ((header.ToLower() == "адрес проживания" ) && (cellValue.ToString() == "")) 
+                            if ((header.ToLower() == "адрес проживания") && (cellValue.ToString() == ""))
                             {
                                 student.AddressResidentialCity = student.AddressRegistrationCity;
                                 student.AddressResidentialApartment = student.AddressRegistrationApartment;
@@ -788,7 +791,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                 student.AddressResidentialStreet = student.AddressRegistrationStreet;
                                 student.AddressResidentialType = student.AddressRegistrationType;
                             }
-                            if (student.EducationReceivedEndYear == null) 
+                            if (student.EducationReceivedEndYear == null)
                             {
                                 if (student.EducationReceivedDate.HasValue)
                                 {
@@ -799,8 +802,8 @@ namespace Dekauto.Import.Service.Domain.Services
                         students.Add(student);
                     }
                 }
-                
-            } 
+
+            }
             return students;
         }
 
@@ -880,7 +883,7 @@ namespace Dekauto.Import.Service.Domain.Services
                         if (double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out score))
                             return true;
 
-                        
+
                         var normalized = str.Replace(" ", string.Empty).Replace(",", ".");
                         return double.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out score);
                     }
@@ -1137,9 +1140,14 @@ namespace Dekauto.Import.Service.Domain.Services
                             }
                         }
                     }
-                }               
+                }
             }
             return students;
+        }
+
+        public Task<Student> GetStudentCard(IFormFile studentCard)
+        {
+            throw new NotImplementedException();
         }
     }
 }

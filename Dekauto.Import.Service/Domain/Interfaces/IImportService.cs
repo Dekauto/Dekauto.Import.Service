@@ -9,5 +9,8 @@ namespace Dekauto.Import.Service.Domain.Interfaces
         Task<IEnumerable<Student>> GetStudentsJournal(IFormFile journal, List<Student> students);
         Task<IEnumerable<Student>> GetStudentsStatement(IFormFile statement, List<Student> studentsJournal);
         Task<IEnumerable<Student>> GetStudentsEducationPlan(IFormFile plan, List<Student> students);
+
+        // Отдельный метод парсинга карточки студента для формирования данных для приложения диплома
+        Task<Student> GetStudentCard(IFormFile studentCard);
     }
 }
