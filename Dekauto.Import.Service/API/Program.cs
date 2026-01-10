@@ -68,7 +68,53 @@ try
 
     builder.Services.AddSwaggerGen(c =>
     {
-        c.SwaggerDoc("v1", new OpenApiInfo { Title = "Import Service", Version = "v1" });
+        c.SwaggerDoc("v1", new OpenApiInfo 
+        { 
+            Title = "Dekauto Import Service API", 
+            Version = "v1",
+            Description = @"
+## Назначение сервиса
+
+Сервис импорта данных из файлов Excel для системы управления студентами Dekauto. 
+Сервис обрабатывает различные типы документов (личные дела, договоры, журналы, ведомости, учебные планы) 
+и извлекает структурированные данные о студентах и их академических результатах.
+
+## Авторизация
+
+Для работы с API требуется базовая HTTP-авторизация (Basic Authentication).
+Все защищенные endpoints требуют передачи заголовка `Authorization` с учетными данными в формате:
+```
+Authorization: Basic base64(username:password)
+```
+
+## Типы обрабатываемых файлов на данный момент
+
+- **ld** (Личное дело) - Excel файл с персональными данными студентов
+- **contract** (Договор) - Excel файл с информацией о договорах на обучение
+- **journal** (Журнал) - Excel файл с номерами зачетных книжек и группами
+- **statement** (Ведомость) - Excel файл с оценками по дисциплинам
+- **plan** (Учебный план) - Excel файл с учебным планом и типами контроля
+
+Все файлы должны быть в формате `.xlsx`.
+
+## Порядок обработки
+
+1. Сначала обрабатывается файл личных дел (ld) - создается базовый список студентов
+2. Затем файл договоров (contract) - добавляется информация о договорах
+3. Далее журнал (journal) - добавляются номера зачеток и группы
+4. Ведомость (statement) - добавляются оценки и результаты по дисциплинам
+5. Учебный план (plan) - добавляются часы, зачетные единицы и типы контроля
+
+## Обработка ошибок
+
+API возвращает стандартные HTTP коды ответов:
+- `200 OK` - успешная обработка
+- `400 Bad Request` - ошибка валидации или неподдерживаемый формат файла
+- `401 Unauthorized` - требуется авторизация
+- `404 Not Found` - файл не найден
+- `500 Internal Server Error` - внутренняя ошибка сервера
+"
+        });
 
         c.AddSecurityDefinition("Basic", new OpenApiSecurityScheme
         {
@@ -76,23 +122,31 @@ try
             Type = SecuritySchemeType.Http,
             Scheme = "Basic",
             In = ParameterLocation.Header,
-            Description = "Basic Authorization header using the Bearer scheme."
+            Description = "Базовая HTTP-авторизация. Укажите учетные данные в формате: Basic base64(username:password)"
         });
 
         c.AddSecurityRequirement(new OpenApiSecurityRequirement
-    {
         {
-            new OpenApiSecurityScheme
             {
-                Reference = new OpenApiReference
+                new OpenApiSecurityScheme
                 {
-                    Type = ReferenceType.SecurityScheme,
-                    Id = "Basic"
-                }
-            },
-            new string[] {}
+                    Reference = new OpenApiReference
+                    {
+                        Type = ReferenceType.SecurityScheme,
+                        Id = "Basic"
+                    }
+                },
+                new string[] {}
+            }
+        });
+
+        // Включаем XML-комментарии для Swagger
+        var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+        var xmlPath = System.IO.Path.Combine(AppContext.BaseDirectory, xmlFile);
+        if (File.Exists(xmlPath))
+        {
+            c.IncludeXmlComments(xmlPath);
         }
-    });
     });
     builder.Services.AddTransient<IImportService, ImportsService>();
     builder.Services.AddSingleton<IRequestMetricsService, RequestMetricsService>();
