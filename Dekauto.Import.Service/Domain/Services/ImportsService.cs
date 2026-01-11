@@ -1154,35 +1154,41 @@ namespace Dekauto.Import.Service.Domain.Services
                 await studentCard.CopyToAsync(stream);
                 using (var package = new ExcelPackage(stream))
                 {
+                    // Важно: рассчитываем формулы, если это возможно, но для сломанных ссылок будем брать Text
                     package.Workbook.Calculate();
 
-                    // Начальный скан документа
-                    var worksheet = package.Workbook.Worksheets[0] ?? throw new InvalidOperationException("Загруженный файл не содержит листов");
+                    // Начальный скан документа (Лист 1)
+                    var firstSheet = package.Workbook.Worksheets[0] ?? throw new InvalidOperationException("Загруженный файл не содержит листов");
 
-                    // Словарь констант, в который записываются все фиксированные текстовые ячейки и соответствующие им поля в модели
-                    // Значения пишутся с большой буквы
+                    // 1. Парсинг основной инфо (как было)
                     var mappings = new Dictionary<(int row, int col), Action<string>>
                     {
-                        [(3, 2)] = val => diplomaData.Surname = Char.ToUpper(val[0]) + val.Substring(1),
-                        [(4, 2)] = val => diplomaData.Name = Char.ToUpper(val[0]) + val.Substring(1),
-                        [(5, 2)] = val => diplomaData.Patronymic = Char.ToUpper(val[0]) + val.Substring(1),
-                        [(40, 4)] = val => diplomaData.EducationReceived = Char.ToUpper(val[0]) + val.Substring(1)
+                        [(3, 2)] = val => diplomaData.Surname = Capitalize(val),
+                        [(4, 2)] = val => diplomaData.Name = Capitalize(val),
+                        [(5, 2)] = val => diplomaData.Patronymic = Capitalize(val),
+                        [(40, 4)] = val => diplomaData.EducationReceived = Capitalize(val)
                     };
 
-                    // Пробежка по текстовым ячейкам
                     foreach (var ((row, col), setter) in mappings)
                     {
-                        var cell = worksheet.Cells[row, col];
+                        var cell = firstSheet.Cells[row, col];
                         logger.LogDebug($"Значение ячейки [{row}, {col}]: {cell.Text}");
                         setter(cell.Text);
                     }
 
-                    // Добавление полей-дат вручную:
-                    diplomaData.BirthdayDate = ObjectToDateOnly(worksheet.Cells[6, 5].Value);
-                    diplomaData.EducationReceivedDate = ObjectToDateOnly(worksheet.Cells[42, 8].Value);
+                    diplomaData.BirthdayDate = ObjectToDateOnly(firstSheet.Cells[6, 5].Value);
+                    diplomaData.EducationReceivedDate = ObjectToDateOnly(firstSheet.Cells[42, 8].Value);
 
-                    // Парсим набор оценок (и их дисциплин)
+                    // 2. Парсинг набора оценок (семестры)
                     var (disciplineGrades, honors) = ParseDisciplineGradesFromCard(package.Workbook.Worksheets);
+
+                    // 3. Парсинг финализации (Гос. экз и ВКР) с первого листа
+                    var finalizationResults = ParseFinalizationData(firstSheet);
+                    if (finalizationResults.Any())
+                    {
+                        disciplineGrades.AddRange(finalizationResults);
+                        logger.LogInformation($"Добавлено {finalizationResults.Count} записей итоговой аттестации (Гос.экзамен/ВКР).");
+                    }
 
                     diplomaData.DisciplineResults = disciplineGrades;
                     diplomaData.DiplomaWithHonors = honors;
@@ -1190,6 +1196,98 @@ namespace Dekauto.Import.Service.Domain.Services
             }
 
             return diplomaData;
+        }
+
+        private string Capitalize(string val)
+        {
+            if (string.IsNullOrWhiteSpace(val)) return val;
+            val = val.Trim();
+            if (val.Length == 0) return val;
+            return char.ToUpper(val[0]) + val.Substring(1);
+        }
+
+        /// <summary>
+        /// Парсит блок финализации (строки 102-107 первого листа)
+        /// </summary>
+        private List<StudentDisciplineResult> ParseFinalizationData(ExcelWorksheet sheet)
+        {
+            var results = new List<StudentDisciplineResult>();
+
+            // Проверяем наличие заголовка "Финализация" (не обязательно, но полезно для валидации)
+            var header = sheet.Cells["A102"].Text;
+            if (string.IsNullOrWhiteSpace(header))
+            {
+                logger.LogWarning("Не найден заголовок 'Финализация' в ячейке A102. Пытаемся считать данные по фиксированным координатам.");
+            }
+
+            // --- 1. Государственный экзамен (Строка 104) ---
+            // Оценка: D104 (объединена D-E)
+            // Дата: G104
+            string stateExamScoreRaw = sheet.Cells["D104"].Text;
+
+            // Если оценка есть (не пусто), добавляем запись
+            if (!string.IsNullOrWhiteSpace(stateExamScoreRaw))
+            {
+                var date = ObjectToDateOnly(sheet.Cells["G104"].Value, false);
+
+                var stateExam = new StudentDisciplineResult
+                {
+                    DisciplineName = "Государственный экзамен",
+                    Score = MapGradeTo15Scale(stateExamScoreRaw),
+                    ControlType = "экзамен", // или "государственный экзамен"
+                    CreditUnits = 0, // Не указано в задаче, ставим 0
+                    AudHours = 0,
+                    Year = date is null ? null : (short)date.Value.Year,
+                    Semester = null // Итоговая аттестация вне семестров
+                };
+                results.Add(stateExam);
+                logger.LogDebug($"Добавлен гос. экзамен: {stateExam.Score} ({stateExamScoreRaw})");
+            }
+
+            // --- 2. Защита ВКР (Строка 105 + Тема 107) ---
+            // Оценка: D105
+            // Дата: G105
+            // Тема: A107 (объединена A-J)
+            string vkrScoreRaw = sheet.Cells["D105"].Text;
+
+            if (!string.IsNullOrWhiteSpace(vkrScoreRaw))
+            {
+                var date = ObjectToDateOnly(sheet.Cells["G105"].Value, false);
+                string topicRaw = sheet.Cells["A107"].Text;
+
+                // Очистка темы от кавычек, если они есть в начале/конце, 
+                // так как мы будем оборачивать её в формат.
+                string topicClean = topicRaw?.Trim() ?? "";
+                if (topicClean.StartsWith("\"") && topicClean.EndsWith("\"") && topicClean.Length > 1)
+                {
+                    topicClean = topicClean.Substring(1, topicClean.Length - 2);
+                }
+
+                if (string.IsNullOrWhiteSpace(topicClean))
+                {
+                    topicClean = "Тема выпускной квалификационной работы";
+                }
+
+                // Формируем имя ВКР. 
+                // Вариант: "Выпускная квалификационная работа (бакалаврская работа). Тема: \"...\""
+                // Чтобы экспорт мог корректно разбить это на строки.
+                string vkrName = $"Выпускная квалификационная работа. Тема: \"{topicClean}\"";
+
+                var vkr = new StudentDisciplineResult
+                {
+                    DisciplineName = vkrName,
+                    Score = MapGradeTo15Scale(vkrScoreRaw),
+                    ControlType = "защита вкр",
+                    CreditUnits = 0,
+                    AudHours = 0,
+                    Year = date is null ? null : (short)date.Value.Year,
+                    Semester = null
+                };
+                results.Add(vkr);
+                logger.LogDebug($"Добавлена ВКР: {vkrName}, Оценка: {vkr.Score}");
+            }
+
+            return results;
         }
 
         private (List<StudentDisciplineResult> disciplineResults, bool diplomaWithHonors) ParseDisciplineGradesFromCard(ExcelWorksheets worksheets)
@@ -1230,14 +1328,15 @@ namespace Dekauto.Import.Service.Domain.Services
             foreach (var result in allResults)
             {
                 string disciplineName = result.DisciplineName ?? "";
-
-                // Проверяем, является ли дисциплина практикой или курсовой (не подлежит фильтрации)
+                // Фильтр для практик и спец. имен (добавили ВКР/Гос чтобы они не схлопнулись случайно, если попадут сюда)
                 if (disciplineName.Contains("НАЗВАНИЕ ДИСЦИПЛИНЫ") ||
-                    disciplineName.Contains("Учебная практика", StringComparison.OrdinalIgnoreCase) ||
-                    disciplineName.Contains("Производственная практика", StringComparison.OrdinalIgnoreCase))
+                    disciplineName.Contains("Выпускная квалификационная работа", StringComparison.OrdinalIgnoreCase) ||
+                    disciplineName.Contains("Государственный экзамен", StringComparison.OrdinalIgnoreCase) ||
+                    disciplineName.Contains("Учебная практик", StringComparison.OrdinalIgnoreCase) ||
+                    disciplineName.Contains("научно-исследоват", StringComparison.OrdinalIgnoreCase) ||
+                    disciplineName.Contains("Производственная практик", StringComparison.OrdinalIgnoreCase))
                 {
                     nonUniqueDisciplines.Add(result);
-                    logger.LogTrace($"Добавлена в nonUnique: {disciplineName}");
                 }
                 else
                 {
@@ -1245,32 +1344,13 @@ namespace Dekauto.Import.Service.Domain.Services
                 }
             }
 
-            logger.LogDebug($"Уникальных дисциплин (фильтруемых): {uniqueDisciplines.Count}");
-            logger.LogDebug($"Не уникальных дисциплин (практики и курсовые): {nonUniqueDisciplines.Count}");
-
-            // Группируем уникальные дисциплины по названию и выбираем последнюю оценку
             var filteredUnique = uniqueDisciplines
                 .GroupBy(r => r.DisciplineName)
-                .Select(g =>
-                {
-                    var latest = g
-                        .OrderByDescending(r => r.Year ?? 0)
-                        .ThenByDescending(r => r.Semester)
-                        .First();
-                    logger.LogTrace($"Для дисциплины '{g.Key}' выбрана оценка за семестр {latest.Semester}, год {latest.Year}");
-                    return latest;
-                })
+                .Select(g => g.OrderByDescending(r => r.Year ?? 0).ThenByDescending(r => r.Semester).First())
                 .ToList();
 
-            // Объединяем результаты: уникальные (отфильтрованные) + не уникальные (все)
             var finalResults = filteredUnique.Concat(nonUniqueDisciplines).ToList();
-
-            logger.LogInformation($"После фильтрации: {finalResults.Count} дисциплин ({filteredUnique.Count} уникальных + {nonUniqueDisciplines.Count} практик/курсовых)");
-
-            // Расчёт диплома с отличием (уже реализован ранее)
             bool withHonors = CalculateDiplomaWithHonors(finalResults);
-
-            logger.LogInformation($"Расчет диплома с отличием: {(withHonors ? "ДА" : "НЕТ")}");
 
             return (finalResults, withHonors);
         }
@@ -1280,112 +1360,96 @@ namespace Dekauto.Import.Service.Domain.Services
             logger.LogDebug($"Начало парсинга листа: {sheet.Name}");
             var results = new List<StudentDisciplineResult>();
 
-            // Отбираем ячейки начала таблиц
-            var tableHeaderCells = sheet.Cells.Where(c => c.Value != null && c.Value.ToString().Contains("п/п"));
-            tableHeaderCells = tableHeaderCells.Reverse(); // Начинаем с конца
+            // Отбираем ячейки начала таблиц (п/п)
+            var tableHeaderCells = sheet.Cells
+                .Where(c => c.Value != null && c.Text.Contains("п/п"))
+                .Reverse();
 
-            logger.LogDebug($"Найдено таблиц на листе: {tableHeaderCells.Count()}");
-
-            // Разбор каждой таблицы
             foreach (var headerCell in tableHeaderCells)
             {
-                // Координаты-маркеры, ставим на ячейку заголовка
                 int col = headerCell.Start.Column;
                 int row = headerCell.Start.Row;
 
-                var semester = Convert.ToInt16(sheet.Cells[row - 2, col + 5].Value); // семестр
-                logger.LogDebug($"Найдена таблица с семестром {semester} в позиции R{row}C{col}");
-                logger.LogTrace($"Координаты таблицы: строка {row}, столбец {col}");
+                // Парсинг семестра (2 строки выше, +5 колонок)
+                var semesterVal = sheet.Cells[row - 2, col + 5].Value;
+                short semester = 0;
+                if (semesterVal != null) short.TryParse(semesterVal.ToString(), out semester);
 
-                row += 1; // для старта с (пустой) ячейки ниже
+                row += 1; // Переход к данным
 
-                // Спускаемся вниз до начала отсчета (до заполненных ячеек) 
-                while (sheet.Cells[row, col].Value is null)
-                {
-                    logger.LogTrace($"Пропуск пустой строки {row}");
-                    row += 1;
-                }
+                // Пропуск пустых строк до начала списка
+                while (sheet.Cells[row, col].Value is null) row++;
 
-                logger.LogDebug($"Начало данных в строке {row}");
-                int processedRows = 0;
-
-                // Спускаемся вниз до конца отсчета и парсим данные на каждом ряду
+                // Парсинг строк таблицы
                 while (sheet.Cells[row, col].Value is not null &&
                        sheet.Cells[row, col + 1].Value is not null &&
                        int.TryParse(sheet.Cells[row, col].Value.ToString(), out _))
                 {
-                    logger.LogTrace($"Обработка строки {row}: {sheet.Cells[row, col].Value} - {sheet.Cells[row, col + 1].Value}");
-
                     var result = new StudentDisciplineResult();
-                    result.DisciplineName = sheet.Cells[row, col + 1].Value.ToString().Trim();
-
-                    logger.LogTrace($"Дисциплина: {result.DisciplineName}");
-
+                    result.DisciplineName = sheet.Cells[row, col + 1].Text.Trim(); // Используем Text
                     result.CreditUnits = sheet.Cells[row, col + 2].GetValue<double?>() ?? 0;
                     result.AudHours = sheet.Cells[row, col + 3].GetValue<double?>() ?? 0;
-                    result.ControlType = sheet.Cells[row, col + 6].Value?.ToString()?.Trim() ?? "";
-                    result.Score = sheet.Cells[row, col + 7].Value?.ToString()?.Trim() ?? "";
-
-                    logger.LogTrace($"Форма контроля: {result.ControlType}, Оценка: {result.Score}");
+                    result.ControlType = sheet.Cells[row, col + 6].Text.Trim();
+                    result.Score = sheet.Cells[row, col + 7].Text.Trim(); // Оценка может быть строкой
 
                     var date = ObjectToDateOnly(sheet.Cells[row, col + 10].Value, false);
                     result.Year = date is null ? null : (short)date.Value.Year;
                     result.Semester = semester;
 
-                    logger.LogTrace($"Семестр: {semester}, Год: {result.Year}");
-
                     results.Add(result);
-                    processedRows++;
-                    row += 1;
+                    row++;
                 }
 
-                // Ищем курсовую работу в текущем семестре (в пределах 20 строк после последней дисциплины)
-                logger.LogDebug($"Поиск курсовой работы для семестра {semester}");
+                // --- ПОИСК КУРСОВОЙ РАБОТЫ ---
+                // Ищем в диапазоне 20 строк вниз
                 bool foundCourseWork = false;
+                int maxSearchRow = Math.Min(row + 20, sheet.Dimension.End.Row);
 
-                // Поиск ячейки с текстом "Курсовая работа/Курсовой проект"
-                for (int i = row; i < row + 20 && i <= sheet.Dimension.End.Row; i++)
+                for (int i = row; i < maxSearchRow; i++)
                 {
-                    var cellValue = sheet.Cells[i, col].Value?.ToString()?.Trim();
-                    if (cellValue != null &&
-                        (cellValue.Contains("Курсовая работа") || cellValue.Contains("Курсовой проект")))
+                    // Используем Text для проверки на ошибки ссылок или значения
+                    var cellText = sheet.Cells[i, col].Text.Trim();
+
+                    if (!string.IsNullOrEmpty(cellText) &&
+                        (cellText.Contains("Курсовая работа") || cellText.Contains("Курсовой проект")))
                     {
-                        logger.LogDebug($"Найдена курсовая работа в строке {i}, семестр {semester}");
                         foundCourseWork = true;
 
-                        // Получаем тему курсовой
-                        var topicLabel = sheet.Cells[i + 1, col].Value?.ToString()?.Trim();
-                        string topic = "Неизвестная курсовая";
+                        // 1. Извлекаем тему
+                        // Тема находится на строку ниже (i+1), в следующей колонке (col+1)
+                        // Если там #ССЫЛКА! или пусто -> "Тема курсовой работы"
+                        var topicCell = sheet.Cells[i + 1, col + 1];
+                        string topic = topicCell.Text.Trim();
 
-                        if (topicLabel != null && topicLabel.Contains("по теме"))
+                        // Проверка на ошибки Excel (#REF!, #NAME?, #ССЫЛКА! и т.д.) или пустоту
+                        if (string.IsNullOrWhiteSpace(topic) || topic.StartsWith("#") || topic.Contains("Error"))
                         {
-                            topic = sheet.Cells[i + 1, col + 1].Value?.ToString()?.Trim() ?? "Неизвестная курсовая";
-                            logger.LogTrace($"Тема курсовой: {topic}");
-                        }
-                        else
-                        {
-                            logger.LogWarning($"Для курсовой в семестре {semester} не найдена пометка 'по теме'");
-                        }
-
-                        // Если тема пустая или содержит формулу (начинается с "="), считаем неизвестной
-                        if (string.IsNullOrWhiteSpace(topic) || topic.StartsWith("="))
-                        {
-                            topic = "Неизвестная курсовая";
-                            logger.LogWarning($"Тема курсовой пустая или содержит формулу, установлена как '{topic}'");
+                            topic = "Тема курсовой работы";
+                            logger.LogWarning($"Тема курсовой (сем. {semester}) не распознана (ошибка формулы или пусто). Установлена заглушка: {topic}");
                         }
 
-                        // Получаем остальные данные
-                        string controlType = sheet.Cells[i, col + 5].Value?.ToString()?.Trim() ?? "экзамен";
-                        string score = sheet.Cells[i, col + 6].Value?.ToString()?.Trim() ?? "";
+                        // 2. Формируем название дисциплины по шаблону
+                        string disciplineName = $"НАЗВАНИЕ ДИСЦИПЛИНЫ \"{topic}\"";
+
+                        // 3. Извлекаем оценку и контроль
+                        // Контроль: col + 5, Оценка: col + 6
+                        string controlType = sheet.Cells[i, col + 5].Text.Trim();
+                        if (string.IsNullOrEmpty(controlType) || controlType.StartsWith("#")) controlType = "экзамен"; // Фолбек
+
+                        string score = sheet.Cells[i, col + 6].Text.Trim();
+                        if (score.StartsWith("#"))
+                        {
+                            score = "х"; // Если оценка сломана, ставим "х" или пусто
+                        }
+
+                        // 4. Дата и год
                         var courseDate = ObjectToDateOnly(sheet.Cells[i, col + 9].Value, false);
                         short? courseYear = courseDate is null ? null : (short)courseDate.Value.Year;
 
-                        logger.LogTrace($"Курсовая: контроль={controlType}, оценка={score}, год={courseYear}");
-
-                        // Создаем запись о курсовой
+                        // Добавляем результат
                         var courseResult = new StudentDisciplineResult
                         {
-                            DisciplineName = $"НАЗВАНИЕ ДИСЦИПЛИНЫ \"{topic}\"",
+                            DisciplineName = disciplineName,
                             CreditUnits = 0,
                             AudHours = 0,
                             ControlType = controlType,
@@ -1395,20 +1459,14 @@ namespace Dekauto.Import.Service.Domain.Services
                         };
 
                         results.Add(courseResult);
-                        logger.LogDebug($"Добавлена курсовая работа: {courseResult.DisciplineName}");
+                        logger.LogDebug($"Добавлена курсовая: {disciplineName}, Оценка: {score}");
+
+                        // Прерываем поиск для этой таблицы (обычно одна курсовая на семестр в этом блоке)
                         break;
                     }
                 }
-
-                if (!foundCourseWork)
-                {
-                    logger.LogDebug($"Курсовая работа для семестра {semester} не найдена");
-                }
-
-                logger.LogDebug($"В таблице семестра {semester} обработано строк: {processedRows}");
             }
 
-            logger.LogDebug($"На листе {sheet.Name} найдено всего дисциплин: {results.Count}");
             return results;
         }
 
@@ -1820,6 +1878,33 @@ namespace Dekauto.Import.Service.Domain.Services
         }
 
         /// <summary>
+        /// Маппинг словесных оценок из карточки ("5, отлично") в 15-балльную шкалу.
+        /// </summary>
+        private string MapGradeTo15Scale(string rawScore)
+        {
+            if (string.IsNullOrWhiteSpace(rawScore)) return "";
+            var lower = rawScore.ToLower().Trim();
+
+            // 1. Проверяем наличие цифр 5, 4, 3, 2
+            if (lower.Contains("5")) return "15";
+            if (lower.Contains("4")) return "12";
+            if (lower.Contains("3")) return "9";
+            if (lower.Contains("2")) return "2";
+
+            // 2. Если цифр нет, проверяем слова
+            // "зачтено" (без цифр) считаем как 5 (15) для итоговых аттестаций (обычно они дифференцированы, но если нет - max балл)
+            if (lower.Contains("зачтено") && !lower.Contains("не")) return "15";
+            if (lower.Contains("отлично")) return "15";
+            if (lower.Contains("хорошо")) return "12";
+            if (lower.Contains("удовлетворительно")) return "9";
+
+            // "не зачтено" или "не удовлетворительно"
+            if (lower.Contains("не")) return "2";
+
+            return rawScore; // Возвращаем как есть, если не распознали
+        }
+
+        /// <summary>
         /// Метод, пытающийся вытащить дату из произвольного объекта или выдает ошибку.
         /// Примечание: метод может не использоваться во всех местах ImportService - где-то может 
         /// остаться хвост из такой же логики, без использования этого централизированного метода.
@@ -1832,30 +1917,25 @@ namespace Dekauto.Import.Service.Domain.Services
         {
             var ex = new FormatException($"Не удалось распознать дату: {obj}");
             if (obj is null)
-                if (throwEx)
-                    throw ex;
-                else
-                    return null;
+                return throwEx ? throw ex : null;
 
-            else if (obj is DateTime date)
+            if (obj is DateTime date)
                 return DateOnly.FromDateTime(date);
-            else
+
+            string dateStr = obj.ToString().Trim();
+            // Пытаемся распарсить стандартный формат
+            if (DateTime.TryParseExact(dateStr, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime parsedDate))
             {
-                string dateStr = obj.ToString().Trim();
-                if (DateTime.TryParseExact(
-                    dateStr,
-                    "dd.MM.yyyy",
-                    CultureInfo.InvariantCulture,
-                    DateTimeStyles.None,
-                    out DateTime parsedDate))
-                {
-                    return DateOnly.FromDateTime(parsedDate);
-                }
-                else if (throwEx)
-                    throw ex;
-                else
-                    return null;
+                return DateOnly.FromDateTime(parsedDate);
             }
+
+            // Если дата пришла числом (Excel OLE Automation date)
+            if (double.TryParse(dateStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double oleDate))
+            {
+                return DateOnly.FromDateTime(DateTime.FromOADate(oleDate));
+            }
+
+            return throwEx ? throw ex : null;
         }
     }
 }
