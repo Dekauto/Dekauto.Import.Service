@@ -209,6 +209,22 @@ namespace Dekauto.Import.Service.Domain.Services
                         return Regex.Replace(value, @"\s+", " ").Trim();
                     }
 
+                    // Функция для нормализации названий дисциплин при сравнении (игнорирует "Учебная практика, ")
+                    static string NormalizeDisciplineNameForComparison(string? value)
+                    {
+                        if (string.IsNullOrWhiteSpace(value))
+                            return string.Empty;
+
+                        var normalized = value.Trim();
+                        // Убираем "Учебная практика, " для сравнения
+                        var match = Regex.Match(normalized, @"^Учебная практика,\s*", RegexOptions.IgnoreCase);
+                        if (match.Success)
+                        {
+                            normalized = normalized.Substring(match.Length).Trim();
+                        }
+                        return normalized;
+                    }
+
                     bool TryGetIntCell(int row, int col, out int result)
                     {
                         result = default;
@@ -318,7 +334,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                     x.DisciplineName != null &&
                                     x.Semester.HasValue &&
                                     x.Semester.Value == sem &&
-                                    x.DisciplineName.Equals(disciplineName, StringComparison.OrdinalIgnoreCase));
+                                    NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(NormalizeDisciplineNameForComparison(disciplineName), StringComparison.OrdinalIgnoreCase));
 
                                 if (target == null)
                                     continue;
@@ -392,7 +408,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                         x.DisciplineName != null &&
                                         x.Semester.HasValue &&
                                         x.Semester.Value == oddSemester &&
-                                        x.DisciplineName.Equals(disciplineName, StringComparison.OrdinalIgnoreCase));
+                                        NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(NormalizeDisciplineNameForComparison(disciplineName), StringComparison.OrdinalIgnoreCase));
 
                                     if (targetOdd != null && string.IsNullOrWhiteSpace(targetOdd.ControlType))
                                     {
@@ -407,7 +423,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                         x.DisciplineName != null &&
                                         x.Semester.HasValue &&
                                         x.Semester.Value == evenSemester &&
-                                        x.DisciplineName.Equals(disciplineName, StringComparison.OrdinalIgnoreCase));
+                                        NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(NormalizeDisciplineNameForComparison(disciplineName), StringComparison.OrdinalIgnoreCase));
 
                                     if (targetEven != null && string.IsNullOrWhiteSpace(targetEven.ControlType))
                                     {
@@ -910,6 +926,22 @@ namespace Dekauto.Import.Service.Domain.Services
                         return Regex.Replace(collapsed, @"\s+", " ").Trim();
                     }
 
+                    // Функция для нормализации названий дисциплин при сравнении (игнорирует "Учебная практика, ")
+                    static string NormalizeDisciplineNameForComparison(string? value)
+                    {
+                        if (string.IsNullOrWhiteSpace(value))
+                            return string.Empty;
+
+                        var normalized = value.Trim();
+                        // Убираем "Учебная практика, " для сравнения
+                        var match = Regex.Match(normalized, @"^Учебная практика,\s*", RegexOptions.IgnoreCase);
+                        if (match.Success)
+                        {
+                            normalized = normalized.Substring(match.Length).Trim();
+                        }
+                        return normalized;
+                    }
+
                     // Проверка файла на наличие листов
                     if (packege.Workbook.Worksheets.Count == 0)
                         throw new InvalidOperationException("Загруженный файл не содержит листов");
@@ -1092,15 +1124,25 @@ namespace Dekauto.Import.Service.Domain.Services
 
                                 // Обработка практик: "Учебная практика, ..." или "Производственная практика, ..."
                                 var isPractice = false;
-                                var practiceMatch = Regex.Match(disciplineName, @"^(Учебная практика|Производственная практика),\s*", RegexOptions.IgnoreCase);
-                                if (practiceMatch.Success)
+                                var isProductionPractice = false;
+                                var productionPracticeMatch = Regex.Match(disciplineName, @"^Производственная практика,\s*", RegexOptions.IgnoreCase);
+                                var studyPracticeMatch = Regex.Match(disciplineName, @"^Учебная практика,", RegexOptions.IgnoreCase);
+                                
+                                if (productionPracticeMatch.Success)
                                 {
                                     isPractice = true;
-                                    // Убираем префикс "Учебная практика, " или "Производственная практика, "
-                                    disciplineName = disciplineName.Substring(practiceMatch.Length).Trim();
+                                    isProductionPractice = true;
+                                    // Для "Производственная практика" убираем префикс
+                                    disciplineName = disciplineName.Substring(productionPracticeMatch.Length).Trim();
                                     // Делаем первую букву заглавной
                                     if (!string.IsNullOrEmpty(disciplineName))
                                         disciplineName = char.ToUpper(disciplineName[0]) + disciplineName.Substring(1);
+                                }
+                                else if (studyPracticeMatch.Success)
+                                {
+                                    isPractice = true;
+                                    // Для "Учебная практика" НЕ убираем префикс, название остается как есть
+                                    // Но при сравнении будет использоваться NormalizeDisciplineNameForComparison
                                 }
 
                                 if (!isCourseWork && !isPractice)
@@ -1118,9 +1160,9 @@ namespace Dekauto.Import.Service.Domain.Services
                                     : isPractice
                                         ? student.DisciplineResults.FirstOrDefault(x =>
                                             x.DisciplineName != null &&
-                                            x.DisciplineName.Equals(disciplineName, StringComparison.OrdinalIgnoreCase) &&
                                             x.ControlType != null &&
-                                            x.ControlType.Equals("практика", StringComparison.OrdinalIgnoreCase))
+                                            x.ControlType.Equals("практика", StringComparison.OrdinalIgnoreCase) &&
+                                            NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(NormalizeDisciplineNameForComparison(disciplineName), StringComparison.OrdinalIgnoreCase))
                                         : student.DisciplineResults.FirstOrDefault(x =>
                                             x.DisciplineName != null &&
                                             x.DisciplineName.Equals(disciplineName, StringComparison.OrdinalIgnoreCase));
