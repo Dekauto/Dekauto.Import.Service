@@ -1,7 +1,7 @@
 ﻿using Dekauto.Import.Service.Domain.Entities;
 using Dekauto.Import.Service.Domain.Entities.Adapters;
+using Dekauto.Import.Service.Domain.Entities.DTO;
 using Dekauto.Import.Service.Domain.Interfaces;
-using Dekauto.Import.Service.Domain.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -91,10 +91,10 @@ namespace Dekauto.Import.Service.API.Controllers
                 var journal = files.journal;
                 var statement = files.statement;
                 var plan = files.plan;
-                
+
                 if (ld == null || ld.Length == 0 ||
                     contract == null || contract.Length == 0 ||
-                    journal == null || journal.Length == 0 || 
+                    journal == null || journal.Length == 0 ||
                     statement == null || statement.Length == 0 ||
                     plan == null || plan.Length == 0) throw new ArgumentNullException("Файл не найден");
                 if (!IsValidExcelFile(ld) ||
@@ -110,7 +110,7 @@ namespace Dekauto.Import.Service.API.Controllers
                 logger.LogInformation($"Начало работы с файлом: {journal.FileName}");
                 var studentsJournal = await _importService.GetStudentsJournal(journal, (List<Domain.Entities.Student>)studentsOrder);
                 logger.LogInformation($"Начало работы с файлом: {statement.FileName}");
-                var students = await _importService.GetStudentsStatement(statement,  (List<Domain.Entities.Student>) studentsJournal);
+                var students = await _importService.GetStudentsStatement(statement, (List<Domain.Entities.Student>)studentsJournal);
 
                 logger.LogInformation($"Начало работы с файлом: {plan.FileName}");
                 students = await _importService.GetStudentsEducationPlan(plan, (List<Domain.Entities.Student>)students);
@@ -122,7 +122,7 @@ namespace Dekauto.Import.Service.API.Controllers
                 logger.LogError(ex.Message);
                 return NotFound(ex.Message);
             }
-            catch (FileLoadException ex) 
+            catch (FileLoadException ex)
             {
                 logger.LogError(ex.Message);
                 return BadRequest(ex.Message);
@@ -132,7 +132,47 @@ namespace Dekauto.Import.Service.API.Controllers
                 logger.LogError(ex.Message);
                 return BadRequest(ex.Message);
             }
-            catch (Exception ex) 
+            catch (Exception ex)
+            {
+                logger.LogError(ex.Message);
+                return StatusCode(500, "Ошибка на стороне сервера, обратитесь к администратору");
+            }
+        }
+
+        [HttpPost]
+        [Route("student-card")]
+        public async Task<IActionResult> ImportStudentCard([FromForm] ImportFilesAdapter files)
+        {
+            try
+            {
+                var studentCard = files.studentCard;
+
+                if (studentCard == null || studentCard.Length == 0) throw new ArgumentNullException("Файл не найден");
+                if (!System.IO.Path.GetExtension(studentCard.FileName).Contains(".xls")) throw new FileLoadException(
+                    "Неподдерживаемый формат файла. Пожалуйста, загрузите файл в формате .xlsx");
+
+                logger.LogInformation($"Начало работы с карточкой: {studentCard.FileName}");
+                DiplomaSupplementData data = await _importService.GetStudentCardAsync(studentCard);
+                logger.LogInformation($"Карточка обработана. Отправляем ответом на запрос...");
+
+                return Ok(data);
+            }
+            catch (ArgumentNullException ex)
+            {
+                logger.LogError(ex.Message);
+                return NotFound(ex.Message);
+            }
+            catch (FileLoadException ex)
+            {
+                logger.LogError(ex.Message);
+                return BadRequest(ex.Message);
+            }
+            catch (InvalidOperationException ex)
+            {
+                logger.LogError(ex.Message);
+                return BadRequest(ex.Message);
+            }
+            catch (Exception ex)
             {
                 logger.LogError(ex.Message);
                 return StatusCode(500, "Ошибка на стороне сервера, обратитесь к администратору");
