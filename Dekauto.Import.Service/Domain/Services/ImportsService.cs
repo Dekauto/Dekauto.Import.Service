@@ -1131,7 +1131,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                 var isProductionPractice = false;
                                 var productionPracticeMatch = Regex.Match(disciplineName, @"^Производственная практика,\s*", RegexOptions.IgnoreCase);
                                 var studyPracticeMatch = Regex.Match(disciplineName, @"^Учебная практика,", RegexOptions.IgnoreCase);
-                                
+
                                 if (productionPracticeMatch.Success)
                                 {
                                     isPractice = true;
@@ -1414,7 +1414,6 @@ namespace Dekauto.Import.Service.Domain.Services
             logger.LogDebug($"Начало парсинга листа: {sheet.Name}");
             var results = new List<StudentDisciplineResult>();
 
-            // Отбираем ячейки начала таблиц (п/п)
             var tableHeaderCells = sheet.Cells
                 .Where(c => c.Value != null && c.Text.Contains("п/п"))
                 .Reverse();
@@ -1424,28 +1423,27 @@ namespace Dekauto.Import.Service.Domain.Services
                 int col = headerCell.Start.Column;
                 int row = headerCell.Start.Row;
 
-                // Парсинг семестра (2 строки выше, +5 колонок)
                 var semesterVal = sheet.Cells[row - 2, col + 5].Value;
                 short semester = 0;
                 if (semesterVal != null) short.TryParse(semesterVal.ToString(), out semester);
 
-                row += 1; // Переход к данным
-
-                // Пропуск пустых строк до начала списка
+                row += 1;
                 while (sheet.Cells[row, col].Value is null) row++;
 
-                // Парсинг строк таблицы
+                // --- 1. Обычные дисциплины ---
                 while (sheet.Cells[row, col].Value is not null &&
                        sheet.Cells[row, col + 1].Value is not null &&
                        int.TryParse(sheet.Cells[row, col].Value.ToString(), out _))
                 {
                     var result = new StudentDisciplineResult();
-                    result.DisciplineName = sheet.Cells[row, col + 1].Text.Trim(); // Используем Text
+                    result.DisciplineName = sheet.Cells[row, col + 1].Text.Trim();
                     result.CreditUnits = sheet.Cells[row, col + 2].GetValue<double?>() ?? 0;
                     result.AudHours = sheet.Cells[row, col + 3].GetValue<double?>() ?? 0;
                     result.ControlType = sheet.Cells[row, col + 6].Text.Trim();
-                    result.Score = sheet.Cells[row, col + 7].Text.Trim(); // Оценка может быть строкой
+                    result.Score = sheet.Cells[row, col + 7].Text.Trim();
 
+                    // Парсинг даты для дисциплины (col + 10 = K)
+                    // Используем false, чтобы не падать при ошибке, а ставить null
                     var date = ObjectToDateOnly(sheet.Cells[row, col + 10].Value, false);
                     result.Year = date is null ? null : (short)date.Value.Year;
                     result.Semester = semester;
@@ -1454,69 +1452,81 @@ namespace Dekauto.Import.Service.Domain.Services
                     row++;
                 }
 
-                // --- ПОИСК КУРСОВОЙ РАБОТЫ ---
-                // Ищем в диапазоне 20 строк вниз
-                bool foundCourseWork = false;
+                // --- 2. КУРСОВЫЕ РАБОТЫ ---
                 int maxSearchRow = Math.Min(row + 20, sheet.Dimension.End.Row);
 
                 for (int i = row; i < maxSearchRow; i++)
                 {
-                    // Используем Text для проверки на ошибки ссылок или значения
-                    var cellText = sheet.Cells[i, col].Text.Trim();
+                    var textA = sheet.Cells[i, col].Text.Trim();
+                    var textB = sheet.Cells[i, col + 1].Text.Trim();
 
-                    if (!string.IsNullOrEmpty(cellText) &&
-                        (cellText.Contains("Курсовая работа") || cellText.Contains("Курсовой проект")))
+                    // Ищем строку с заголовком "Курсовая работа"
+                    if ((!string.IsNullOrEmpty(textA) && (textA.Contains("Курсовая работа") || textA.Contains("Курсовой проект"))) ||
+                        (!string.IsNullOrEmpty(textB) && (textB.Contains("Курсовая работа") || textB.Contains("Курсовой проект"))))
                     {
-                        foundCourseWork = true;
+                        // 1. Тема
+                        string topic = "Тема курсовой работы";
+                        int topicRow = i + 1;
 
-                        // 1. Извлекаем тему
-                        // Тема находится на строку ниже (i+1), в следующей колонке (col+1)
-                        // Если там #ССЫЛКА! или пусто -> "Тема курсовой работы"
-                        var topicCell = sheet.Cells[i + 1, col + 1];
-                        string topic = topicCell.Text.Trim();
+                        var cellTopicB = sheet.Cells[topicRow, col + 1].Text.Trim();
+                        var cellTopicC = sheet.Cells[topicRow, col + 2].Text.Trim();
 
-                        // Проверка на ошибки Excel (#REF!, #NAME?, #ССЫЛКА! и т.д.) или пустоту
-                        if (string.IsNullOrWhiteSpace(topic) || topic.StartsWith("#") || topic.Contains("Error"))
+                        if (cellTopicB.Contains("по теме", StringComparison.OrdinalIgnoreCase))
                         {
-                            topic = "Тема курсовой работы";
-                            logger.LogWarning($"Тема курсовой (сем. {semester}) не распознана (ошибка формулы или пусто). Установлена заглушка: {topic}");
+                            topic = (cellTopicB.Length < 15 && !string.IsNullOrWhiteSpace(cellTopicC)) ? cellTopicC : cellTopicB;
+                        }
+                        else if (!string.IsNullOrWhiteSpace(cellTopicC) && !cellTopicC.StartsWith("#") && !cellTopicC.Contains("Error"))
+                        {
+                            topic = cellTopicC;
+                        }
+                        else if (!string.IsNullOrWhiteSpace(cellTopicB) && !cellTopicB.StartsWith("#"))
+                        {
+                            topic = cellTopicB;
                         }
 
-                        // 2. Формируем название дисциплины по шаблону
+                        topic = Regex.Replace(topic, @"^по\s+теме:?\s*", "", RegexOptions.IgnoreCase).Trim().Trim('"');
+                        if (string.IsNullOrWhiteSpace(topic) || topic.StartsWith("#")) topic = "Тема курсовой работы";
+
                         string disciplineName = $"НАЗВАНИЕ ДИСЦИПЛИНЫ \"{topic}\"";
 
-                        // 3. Извлекаем оценку и контроль
-                        // Контроль: col + 5, Оценка: col + 6
-                        string controlType = sheet.Cells[i, col + 5].Text.Trim();
-                        if (string.IsNullOrEmpty(controlType) || controlType.StartsWith("#")) controlType = "экзамен"; // Фолбек
+                        // 2. Смещения колонок
+                        // ControlType: col + 6 (G)
+                        // Score:       col + 7 (H)
+                        // Date:        col + 9 (J)
 
-                        string score = sheet.Cells[i, col + 6].Text.Trim();
-                        if (score.StartsWith("#"))
+                        // Принудительно "Курсовая работа", игнорируем "экзамен" из ячейки
+                        string controlType = "Курсовая работа";
+
+                        // Получаем оценку
+                        string scoreRaw = sheet.Cells[i, col + 7].Text.Trim();
+                        if (string.IsNullOrWhiteSpace(scoreRaw) || scoreRaw.StartsWith("#")) scoreRaw = "0";
+
+                        // 3. Парсинг года (col + 9)
+                        var dateCellVal = sheet.Cells[i, col + 9].Value;
+                        short? courseYear = null;
+
+                        // Используем наш обновленный безопасный метод
+                        var courseDateObj = ObjectToDateOnly(dateCellVal, false);
+                        if (courseDateObj != null)
                         {
-                            score = "х"; // Если оценка сломана, ставим "х" или пусто
+                            courseYear = (short)courseDateObj.Value.Year;
                         }
 
-                        // 4. Дата и год
-                        var courseDate = ObjectToDateOnly(sheet.Cells[i, col + 9].Value, false);
-                        short? courseYear = courseDate is null ? null : (short)courseDate.Value.Year;
-
-                        // Добавляем результат
                         var courseResult = new StudentDisciplineResult
                         {
                             DisciplineName = disciplineName,
                             CreditUnits = 0,
                             AudHours = 0,
                             ControlType = controlType,
-                            Score = score,
+                            Score = scoreRaw,
                             Year = courseYear,
                             Semester = semester
                         };
 
                         results.Add(courseResult);
-                        logger.LogDebug($"Добавлена курсовая: {disciplineName}, Оценка: {score}");
+                        logger.LogDebug($"Добавлена курсовая: {disciplineName}, Оценка: {scoreRaw}, Год: {courseYear}");
 
-                        // Прерываем поиск для этой таблицы (обычно одна курсовая на семестр в этом блоке)
-                        break;
+                        i++;
                     }
                 }
             }
@@ -1969,27 +1979,35 @@ namespace Dekauto.Import.Service.Domain.Services
         /// <exception cref="FormatException"></exception>
         private DateOnly? ObjectToDateOnly(object obj, bool throwEx = true)
         {
-            var ex = new FormatException($"Не удалось распознать дату: {obj}");
-            if (obj is null)
-                return throwEx ? throw ex : null;
+            if (obj is null || string.IsNullOrWhiteSpace(obj.ToString()))
+                return throwEx ? throw new FormatException("Дата пуста") : null;
 
+            // 1. Если Excel вернул DateTime
             if (obj is DateTime date)
                 return DateOnly.FromDateTime(date);
 
             string dateStr = obj.ToString().Trim();
-            // Пытаемся распарсить стандартный формат
-            if (DateTime.TryParseExact(dateStr, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime parsedDate))
-            {
-                return DateOnly.FromDateTime(parsedDate);
-            }
 
-            // Если дата пришла числом (Excel OLE Automation date)
+            // 2. Если Excel вернул число (OLE Automation Date)
             if (double.TryParse(dateStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double oleDate))
             {
                 return DateOnly.FromDateTime(DateTime.FromOADate(oleDate));
             }
 
-            return throwEx ? throw ex : null;
+            // 3. Парсинг строки по конкретным шаблонам (Invariant Mode Safe)
+            // Учитываем варианты с ведущими нулями и без (д.М.гггг)
+            string[] formats = {
+                "dd.MM.yyyy", "d.M.yyyy",
+                "d.MM.yyyy",  "dd.M.yyyy",
+                "yyyy-MM-dd" // на всякий случай ISO
+            };
+
+            if (DateTime.TryParseExact(dateStr, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime parsedDate))
+            {
+                return DateOnly.FromDateTime(parsedDate);
+            }
+
+            return throwEx ? throw new FormatException($"Не удалось распознать дату: {obj}") : null;
         }
     }
 }
