@@ -22,6 +22,14 @@ namespace Dekauto.Import.Service.API.Controllers
         private readonly IImportService _importService;
         private readonly ILogger<ImportController> logger;
 
+        // Метод для проверки формата файла .xlsx и .xlsm
+        private bool IsValidExcelFile(IFormFile file)
+        {
+            var allowedExtensions = new[] { ".xlsx", ".xlsm"};
+            var extension = System.IO.Path.GetExtension(file.FileName).ToLowerInvariant();
+            return allowedExtensions.Contains(extension);
+        }
+
         public ImportController(IImportService importService, ILogger<ImportController> logger)
         {
             _importService = importService ?? throw new ArgumentNullException(nameof(importService));
@@ -89,12 +97,12 @@ namespace Dekauto.Import.Service.API.Controllers
                     journal == null || journal.Length == 0 ||
                     statement == null || statement.Length == 0 ||
                     plan == null || plan.Length == 0) throw new ArgumentNullException("Файл не найден");
-                if (System.IO.Path.GetExtension(ld.FileName) != ".xlsx" ||
-                    System.IO.Path.GetExtension(contract.FileName) != ".xlsx" ||
-                    System.IO.Path.GetExtension(journal.FileName) != ".xlsx" ||
-                    System.IO.Path.GetExtension(statement.FileName) != ".xlsx" ||
-                    System.IO.Path.GetExtension(plan.FileName) != ".xlsx") throw new FileLoadException(
-                    "Неподдерживаемый формат файла. Пожалуйста, загрузите файл в формате .xlsx");
+                if (!IsValidExcelFile(ld) ||
+                    !IsValidExcelFile(contract) || 
+                    !IsValidExcelFile(journal) ||
+                    !IsValidExcelFile(statement) ||
+                    !IsValidExcelFile(plan)) throw new FileLoadException(
+                    "Неподдерживаемый формат файла. Пожалуйста, загрузите файл в формате .xlsx/.xlsm");
                 logger.LogInformation($"Начало работы с файлом: {ld.FileName}");
                 var studentsLD = await _importService.GetStudentsLD(ld);
                 logger.LogInformation($"Начало работы с файлом: {contract.FileName}");
