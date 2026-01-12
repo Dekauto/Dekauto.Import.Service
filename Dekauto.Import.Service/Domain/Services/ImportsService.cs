@@ -209,18 +209,26 @@ namespace Dekauto.Import.Service.Domain.Services
                         return Regex.Replace(value, @"\s+", " ").Trim();
                     }
 
-                    // Функция для нормализации названий дисциплин при сравнении (игнорирует "Учебная практика, ")
+                    // Функция для нормализации названий дисциплин при сравнении (игнорирует "Учебная практика, " и "Производственная практика, ")
                     static string NormalizeDisciplineNameForComparison(string? value)
                     {
                         if (string.IsNullOrWhiteSpace(value))
                             return string.Empty;
 
                         var normalized = value.Trim();
-                        // Убираем "Учебная практика, " для сравнения
-                        var match = Regex.Match(normalized, @"^Учебная практика,\s*", RegexOptions.IgnoreCase);
-                        if (match.Success)
+                        // Убираем "Учебная практика, " или "Производственная практика, " для сравнения
+                        var studyMatch = Regex.Match(normalized, @"^Учебная практика,\s*", RegexOptions.IgnoreCase);
+                        if (studyMatch.Success)
                         {
-                            normalized = normalized.Substring(match.Length).Trim();
+                            normalized = normalized.Substring(studyMatch.Length).Trim();
+                        }
+                        else
+                        {
+                            var productionMatch = Regex.Match(normalized, @"^Производственная практика,\s*", RegexOptions.IgnoreCase);
+                            if (productionMatch.Success)
+                            {
+                                normalized = normalized.Substring(productionMatch.Length).Trim();
+                            }
                         }
                         return normalized;
                     }
@@ -926,18 +934,26 @@ namespace Dekauto.Import.Service.Domain.Services
                         return Regex.Replace(collapsed, @"\s+", " ").Trim();
                     }
 
-                    // Функция для нормализации названий дисциплин при сравнении (игнорирует "Учебная практика, ")
+                    // Функция для нормализации названий дисциплин при сравнении (игнорирует "Учебная практика, " и "Производственная практика, ")
                     static string NormalizeDisciplineNameForComparison(string? value)
                     {
                         if (string.IsNullOrWhiteSpace(value))
                             return string.Empty;
 
                         var normalized = value.Trim();
-                        // Убираем "Учебная практика, " для сравнения
-                        var match = Regex.Match(normalized, @"^Учебная практика,\s*", RegexOptions.IgnoreCase);
-                        if (match.Success)
+                        // Убираем "Учебная практика, " или "Производственная практика, " для сравнения
+                        var studyMatch = Regex.Match(normalized, @"^Учебная практика,\s*", RegexOptions.IgnoreCase);
+                        if (studyMatch.Success)
                         {
-                            normalized = normalized.Substring(match.Length).Trim();
+                            normalized = normalized.Substring(studyMatch.Length).Trim();
+                        }
+                        else
+                        {
+                            var productionMatch = Regex.Match(normalized, @"^Производственная практика,\s*", RegexOptions.IgnoreCase);
+                            if (productionMatch.Success)
+                            {
+                                normalized = normalized.Substring(productionMatch.Length).Trim();
+                            }
                         }
                         return normalized;
                     }
@@ -1124,24 +1140,13 @@ namespace Dekauto.Import.Service.Domain.Services
 
                                 // Обработка практик: "Учебная практика, ..." или "Производственная практика, ..."
                                 var isPractice = false;
-                                var isProductionPractice = false;
-                                var productionPracticeMatch = Regex.Match(disciplineName, @"^Производственная практика,\s*", RegexOptions.IgnoreCase);
+                                var productionPracticeMatch = Regex.Match(disciplineName, @"^Производственная практика,", RegexOptions.IgnoreCase);
                                 var studyPracticeMatch = Regex.Match(disciplineName, @"^Учебная практика,", RegexOptions.IgnoreCase);
                                 
-                                if (productionPracticeMatch.Success)
+                                if (productionPracticeMatch.Success || studyPracticeMatch.Success)
                                 {
                                     isPractice = true;
-                                    isProductionPractice = true;
-                                    // Для "Производственная практика" убираем префикс
-                                    disciplineName = disciplineName.Substring(productionPracticeMatch.Length).Trim();
-                                    // Делаем первую букву заглавной
-                                    if (!string.IsNullOrEmpty(disciplineName))
-                                        disciplineName = char.ToUpper(disciplineName[0]) + disciplineName.Substring(1);
-                                }
-                                else if (studyPracticeMatch.Success)
-                                {
-                                    isPractice = true;
-                                    // Для "Учебная практика" НЕ убираем префикс, название остается как есть
+                                    // Для практик НЕ убирается префикс, название остается как есть
                                     // Но при сравнении будет использоваться NormalizeDisciplineNameForComparison
                                 }
 
