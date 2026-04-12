@@ -47,6 +47,39 @@ namespace Dekauto.Import.Service.Domain.Services
             return normalized;
         }
 
+        private const double PlanCardFuzzySimilarityThreshold = 0.82;
+
+        private static int LevenshteinDistance(string a, string b)
+        {
+            int n = a.Length;
+            int m = b.Length;
+            if (n == 0) return m;
+            if (m == 0) return n;
+            var d = new int[n + 1, m + 1];
+            for (int i = 0; i <= n; i++) d[i, 0] = i;
+            for (int j = 0; j <= m; j++) d[0, j] = j;
+            for (int i = 1; i <= n; i++)
+            {
+                for (int j = 1; j <= m; j++)
+                {
+                    int cost = char.ToLowerInvariant(a[i - 1]) == char.ToLowerInvariant(b[j - 1]) ? 0 : 1;
+                    d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
+                }
+            }
+            return d[n, m];
+        }
+
+        private static double DisciplineNameSimilarityRatio(string? planName, string? cardName)
+        {
+            var na = NormalizeDisciplineName(planName).ToLowerInvariant();
+            var nb = NormalizeDisciplineName(cardName).ToLowerInvariant();
+            if (na.Length == 0 && nb.Length == 0) return 1d;
+            if (na.Length == 0 || nb.Length == 0) return 0d;
+            int dist = LevenshteinDistance(na, nb);
+            int mx = Math.Max(na.Length, nb.Length);
+            return 1d - (double)dist / mx;
+        }
+
         public async Task<IEnumerable<Student>> GetStudentsContract(IFormFile contract, List<Student> students)
         {
             using (var stream = new MemoryStream())
@@ -646,31 +679,41 @@ namespace Dekauto.Import.Service.Domain.Services
                 var totalZe = pe.CreditUnitsBySemester.Values.Sum();
                 double? totalCredits = totalZe > 0 ? totalZe : (double?)null;
 
-                var exact = pool
-                    .Where(c => c.DisciplineName != null &&
-                        string.Equals(NormalizeDisciplineName(c.DisciplineName), NormalizeDisciplineName(planName), StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                List<StudentDisciplineResult> taken;
-                if (exact.Count > 0)
-                    taken = exact;
-                else
-                {
-                    taken = pool
-                        .Where(c => c.DisciplineName != null &&
-                            string.Equals(
-                                NormalizeDisciplineNameForComparison(c.DisciplineName),
-                                NormalizeDisciplineNameForComparison(planName),
-                                StringComparison.OrdinalIgnoreCase))
-                        .ToList();
-                }
-
                 short? planGuessSem = null;
                 if (pe.CreditUnitsBySemester.Any(kv => kv.Value > 0))
                     planGuessSem = (short)pe.CreditUnitsBySemester.Where(kv => kv.Value > 0).OrderBy(kv => kv.Key).First().Key;
 
-                if (taken.Count == 0)
+                var exact = pool
+                    .Where(c => c.DisciplineName != null &&
+                        string.Equals(NormalizeDisciplineName(c.DisciplineName), NormalizeDisciplineName(planName), StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                if (exact.Count == 1)
                 {
-                    logger.LogWarning("План: дисциплина PlanOrder={Order} «{Name}» — нет соответствия в карточке.", pe.PlanOrder, planName);
+                    var chosen = exact[0];
+                    pool.Remove(chosen);
+                    output.Add(new StudentDisciplineResult
+                    {
+                        DisciplineName = planName,
+                        PlanOrder = pe.PlanOrder,
+                        AudHours = pe.TotalAudHours,
+                        CreditUnits = totalCredits,
+                        Score = chosen.Score,
+                        Semester = chosen.Semester ?? planGuessSem,
+                        Year = chosen.Year,
+                        ControlType = chosen.ControlType,
+                        RequiresManualValidation = false
+                    });
+                    continue;
+                }
+
+                if (exact.Count > 1)
+                {
+                    foreach (var t in exact)
+                        pool.Remove(t);
+                    logger.LogWarning(
+                        "План: PlanOrder={Order} «{Name}» — несколько точных совпадений в карточке, оценка не проставляется.",
+                        pe.PlanOrder, planName);
                     output.Add(new StudentDisciplineResult
                     {
                         DisciplineName = planName,
@@ -683,26 +726,104 @@ namespace Dekauto.Import.Service.Domain.Services
                     continue;
                 }
 
-                var chosen = taken
-                    .OrderByDescending(x => x.Semester ?? 0)
-                    .ThenByDescending(x => x.Year ?? 0)
-                    .First();
-                var needsAttention = exact.Count == 0 && taken.Count > 1;
+                var relaxed = pool
+                    .Where(c => c.DisciplineName != null &&
+                        string.Equals(
+                            NormalizeDisciplineNameForComparison(c.DisciplineName),
+                            NormalizeDisciplineNameForComparison(planName),
+                            StringComparison.OrdinalIgnoreCase))
+                    .ToList();
 
-                foreach (var t in taken)
-                    pool.Remove(t);
+                if (relaxed.Count == 1)
+                {
+                    var chosen = relaxed[0];
+                    pool.Remove(chosen);
+                    output.Add(new StudentDisciplineResult
+                    {
+                        DisciplineName = planName,
+                        PlanOrder = pe.PlanOrder,
+                        AudHours = pe.TotalAudHours,
+                        CreditUnits = totalCredits,
+                        Score = chosen.Score,
+                        Semester = chosen.Semester ?? planGuessSem,
+                        Year = chosen.Year,
+                        ControlType = chosen.ControlType,
+                        RequiresManualValidation = false
+                    });
+                    continue;
+                }
 
+                if (relaxed.Count > 1)
+                {
+                    foreach (var t in relaxed)
+                        pool.Remove(t);
+                    logger.LogWarning(
+                        "План: PlanOrder={Order} «{Name}» — неоднозначное relaxed-сопоставление ({Count} строк карточки), оценка не проставляется.",
+                        pe.PlanOrder, planName, relaxed.Count);
+                    output.Add(new StudentDisciplineResult
+                    {
+                        DisciplineName = planName,
+                        PlanOrder = pe.PlanOrder,
+                        AudHours = pe.TotalAudHours,
+                        CreditUnits = totalCredits,
+                        Semester = planGuessSem,
+                        RequiresManualValidation = true
+                    });
+                    continue;
+                }
+
+                var fuzzy = pool
+                    .Where(c => c.DisciplineName != null &&
+                        DisciplineNameSimilarityRatio(planName, c.DisciplineName) >= PlanCardFuzzySimilarityThreshold)
+                    .ToList();
+
+                if (fuzzy.Count == 1)
+                {
+                    var chosen = fuzzy[0];
+                    pool.Remove(chosen);
+                    output.Add(new StudentDisciplineResult
+                    {
+                        DisciplineName = planName,
+                        PlanOrder = pe.PlanOrder,
+                        AudHours = pe.TotalAudHours,
+                        CreditUnits = totalCredits,
+                        Score = chosen.Score,
+                        Semester = chosen.Semester ?? planGuessSem,
+                        Year = chosen.Year,
+                        ControlType = chosen.ControlType,
+                        RequiresManualValidation = false
+                    });
+                    continue;
+                }
+
+                if (fuzzy.Count > 1)
+                {
+                    foreach (var t in fuzzy)
+                        pool.Remove(t);
+                    logger.LogWarning(
+                        "План: PlanOrder={Order} «{Name}» — неоднозначное fuzzy-сопоставление ({Count} кандидатов), оценка не проставляется.",
+                        pe.PlanOrder, planName, fuzzy.Count);
+                    output.Add(new StudentDisciplineResult
+                    {
+                        DisciplineName = planName,
+                        PlanOrder = pe.PlanOrder,
+                        AudHours = pe.TotalAudHours,
+                        CreditUnits = totalCredits,
+                        Semester = planGuessSem,
+                        RequiresManualValidation = true
+                    });
+                    continue;
+                }
+
+                logger.LogWarning("План: дисциплина PlanOrder={Order} «{Name}» — нет соответствия в карточке.", pe.PlanOrder, planName);
                 output.Add(new StudentDisciplineResult
                 {
                     DisciplineName = planName,
                     PlanOrder = pe.PlanOrder,
                     AudHours = pe.TotalAudHours,
                     CreditUnits = totalCredits,
-                    Score = chosen.Score,
-                    Semester = chosen.Semester ?? planGuessSem,
-                    Year = chosen.Year,
-                    ControlType = chosen.ControlType,
-                    RequiresManualValidation = needsAttention
+                    Semester = planGuessSem,
+                    RequiresManualValidation = true
                 });
             }
 

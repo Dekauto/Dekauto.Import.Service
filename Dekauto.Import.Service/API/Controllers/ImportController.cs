@@ -141,23 +141,27 @@ namespace Dekauto.Import.Service.API.Controllers
 
         [HttpPost]
         [Route("student-card")]
-        public async Task<IActionResult> ImportStudentCard([FromForm] ImportFilesAdapter files)
+        public async Task<IActionResult> ImportStudentCard([FromForm] ImportFilesAdapter files) =>
             await ImportStudentCardCore(files);
 
         [HttpPost]
         [Route("supplement-data")]
-        public async Task<IActionResult> ImportSupplementData([FromForm] ImportFilesAdapter files)
+        public async Task<IActionResult> ImportSupplementData([FromForm] ImportFilesAdapter files) =>
             await ImportStudentCardCore(files);
 
         private async Task<IActionResult> ImportStudentCardCore(ImportFilesAdapter files)
         {
             try
             {
+                ArgumentNullException.ThrowIfNull(files);
+
                 var studentCard = files.studentCard;
                 var plan = files.plan;
 
-                if (studentCard == null || studentCard.Length == 0) throw new ArgumentNullException("Файл не найден");
-                if (plan == null || plan.Length == 0) throw new ArgumentNullException("Файл не найден");
+                if (studentCard == null || studentCard.Length == 0)
+                    throw new ArgumentNullException(nameof(files.studentCard), "Файл карточки не передан или пуст.");
+                if (plan == null || plan.Length == 0)
+                    throw new ArgumentNullException(nameof(files.plan), "Файл учебного плана не передан или пуст.");
                 if (!IsValidExcelFile(studentCard)) throw new FileLoadException(
                     "Неподдерживаемый формат файла. Пожалуйста, загрузите файл в формате .xlsx/.xlsm");
                 if (!IsValidExcelFile(plan)) throw new FileLoadException(
