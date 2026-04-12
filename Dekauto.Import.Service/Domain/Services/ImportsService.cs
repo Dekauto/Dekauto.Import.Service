@@ -1205,8 +1205,10 @@ namespace Dekauto.Import.Service.Domain.Services
             return students;
         }
 
-        public async Task<DiplomaSupplementData> GetStudentCardAsync(IFormFile studentCard)
+        public async Task<DiplomaSupplementData> GetStudentCardAsync(IFormFile studentCard, IFormFile plan)
         {
+            ArgumentNullException.ThrowIfNull(plan);
+
             var diplomaData = new DiplomaSupplementData();
             using (var stream = new MemoryStream())
             {

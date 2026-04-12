@@ -142,17 +142,29 @@ namespace Dekauto.Import.Service.API.Controllers
         [HttpPost]
         [Route("student-card")]
         public async Task<IActionResult> ImportStudentCard([FromForm] ImportFilesAdapter files)
+            await ImportStudentCardCore(files);
+
+        [HttpPost]
+        [Route("supplement-data")]
+        public async Task<IActionResult> ImportSupplementData([FromForm] ImportFilesAdapter files)
+            await ImportStudentCardCore(files);
+
+        private async Task<IActionResult> ImportStudentCardCore(ImportFilesAdapter files)
         {
             try
             {
                 var studentCard = files.studentCard;
+                var plan = files.plan;
 
                 if (studentCard == null || studentCard.Length == 0) throw new ArgumentNullException("Файл не найден");
-                if (!System.IO.Path.GetExtension(studentCard.FileName).Contains(".xls")) throw new FileLoadException(
-                    "Неподдерживаемый формат файла. Пожалуйста, загрузите файл в формате .xlsx");
+                if (plan == null || plan.Length == 0) throw new ArgumentNullException("Файл не найден");
+                if (!IsValidExcelFile(studentCard)) throw new FileLoadException(
+                    "Неподдерживаемый формат файла. Пожалуйста, загрузите файл в формате .xlsx/.xlsm");
+                if (!IsValidExcelFile(plan)) throw new FileLoadException(
+                    "Неподдерживаемый формат файла плана. Загрузите .xlsx/.xlsm");
 
                 logger.LogInformation($"Начало работы с карточкой: {studentCard.FileName}");
-                DiplomaSupplementData data = await _importService.GetStudentCardAsync(studentCard);
+                DiplomaSupplementData data = await _importService.GetStudentCardAsync(studentCard, plan);
                 logger.LogInformation($"Карточка обработана. Отправляем ответом на запрос...");
 
                 return Ok(data);

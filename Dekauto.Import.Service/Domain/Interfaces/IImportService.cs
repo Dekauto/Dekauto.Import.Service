@@ -15,7 +15,8 @@ namespace Dekauto.Import.Service.Domain.Interfaces
         /// Отдельный метод парсинга карточки студента для формирования данных для приложения диплома
         /// </summary>
         /// <param name="studentCard">Приходящий по API файл карточки студента для парсинга.</param>
+        /// <param name="plan">Приходящий по API файл учебного плана. Обязателен для сопоставления дисциплин и трудоёмкости.</param>
         /// <returns></returns>
-        Task<DiplomaSupplementData> GetStudentCardAsync(IFormFile studentCard);
+        Task<DiplomaSupplementData> GetStudentCardAsync(IFormFile studentCard, IFormFile plan);
     }
 }
