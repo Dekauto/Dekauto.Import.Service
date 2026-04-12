@@ -10,5 +10,9 @@ namespace Dekauto.Import.Service.Domain.Entities
 
         public double? AudHours { get; set; }
         public double? CreditUnits { get; set; }
+
+        public int? PlanOrder { get; set; }
+
+        public bool RequiresManualValidation { get; set; }
     }
 }
