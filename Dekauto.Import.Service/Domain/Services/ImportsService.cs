@@ -482,6 +482,40 @@ namespace Dekauto.Import.Service.Domain.Services
             return students;
         }
 
+        /// <summary>Ячейка "Свод" L8 - целевой объём ОП в з.е.</summary>
+        private static async Task<double?> ReadTargetProgramCreditsFromPlanAsync(IFormFile plan)
+        {
+            using var stream = new MemoryStream();
+            await plan.CopyToAsync(stream);
+            stream.Position = 0;
+            using var package = new ExcelPackage(stream);
+            var ws = package.Workbook.Worksheets["Свод"];
+            if (ws == null)
+                return null;
+
+            var value = ws.Cells[8, 12].Value;
+            if (value == null)
+                return null;
+            if (value is double d)
+                return d;
+            if (value is float f)
+                return f;
+            if (value is decimal dec)
+                return (double)dec;
+            if (value is int i)
+                return i;
+            if (value is long l)
+                return l;
+
+            var str = value.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(str))
+                return null;
+            str = str.Replace(" ", string.Empty).Replace(",", ".");
+            if (double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+                return parsed;
+            return null;
+        }
+
         private async Task<List<PlanDisciplineEntry>> ParseStudyPlanForSupplementAsync(IFormFile plan)
         {
             var result = new List<PlanDisciplineEntry>();
@@ -638,6 +672,10 @@ namespace Dekauto.Import.Service.Domain.Services
                             continue;
 
                         if (worksheet.Cells[row, 4].Style.Font.Bold)
+                            continue;
+
+                        var inPlanMark = worksheet.Cells[row, 2].Text?.Replace('\u00A0', ' ').Trim() ?? string.Empty;
+                        if (!string.Equals(inPlanMark, "+", StringComparison.OrdinalIgnoreCase))
                             continue;
 
                         double? aud = null;
@@ -1594,6 +1632,12 @@ namespace Dekauto.Import.Service.Domain.Services
 
                     // Начальный скан документа (Лист 1)
                     var firstSheet = package.Workbook.Worksheets[0] ?? throw new InvalidOperationException("Загруженный файл не содержит листов");
+                    var infoSheet = package.Workbook.Worksheets["ОбщСведения"] ?? firstSheet;
+                    var courseText = infoSheet.Cells[78, 3].Text?.Trim();
+                    if (!string.IsNullOrWhiteSpace(courseText))
+                        diplomaData.CourseOfTraining = courseText;
+
+                    diplomaData.TargetProgramCredits = await ReadTargetProgramCreditsFromPlanAsync(plan);
 
                     // 1. Парсинг основной инфо (как было)
                     var mappings = new Dictionary<(int row, int col), Action<string>>

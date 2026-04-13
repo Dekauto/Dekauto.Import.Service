@@ -13,6 +13,12 @@
         public string? EducationReceived { get; set; } // Наименование документа о предыдущем образовании
         public DateOnly? EducationReceivedDate { get; set; } // Год выдачи документа образования
 
+        /// <summary>Направление подготовки (специальность) из карточки студента.</summary>
+        public string? CourseOfTraining { get; set; }
+
+        /// <summary>Целевой объём ОП в з.е. из листа «Свод» (например L8).</summary>
+        public double? TargetProgramCredits { get; set; }
+
         // Наименования дисциплин (модулей), практик, курсовых работ
         // +Количество зачетных единиц / академических часов / астрономических часов
         // +Оценка
