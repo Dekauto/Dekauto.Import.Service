@@ -44,7 +44,94 @@ namespace Dekauto.Import.Service.Domain.Services
                     normalized = normalized.Substring(productionMatch.Length).Trim();
                 }
             }
+
+            var practicaComma = Regex.Match(normalized, @"^(.+?практика),\s*", RegexOptions.IgnoreCase);
+            if (practicaComma.Success)
+            {
+                normalized = normalized.Substring(practicaComma.Length).Trim();
+            }
+
+            normalized = Regex.Replace(normalized, @"\bпрофессионально\s*$",
+                "профессиональной деятельности",
+                RegexOptions.IgnoreCase).Trim();
+
+            normalized = Regex.Replace(normalized, @"профессионально\s+деятельности",
+                    "профессиональной деятельности",
+                    RegexOptions.IgnoreCase)
+                .Trim();
+
             return normalized;
+        }
+
+        private static bool IsTruncatedPlanCardNamePrefixMatch(string planName, string? cardName, int minShorterLen = 30)
+        {
+            if (string.IsNullOrWhiteSpace(planName) || string.IsNullOrWhiteSpace(cardName))
+                return false;
+
+            var a = NormalizeDisciplineNameForComparison(planName).Trim();
+            var b = NormalizeDisciplineNameForComparison(cardName).Trim();
+            if (a.Length == 0 || b.Length == 0)
+                return false;
+
+            var shorter = a.Length <= b.Length ? a : b;
+            var longer = a.Length <= b.Length ? b : a;
+            if (shorter.Length < minShorterLen)
+                return false;
+
+            return longer.StartsWith(shorter, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>«Тип практики» + строка названия как в приложении к диплому.</summary>
+        private static string FormatPracticePlanNameWithTypePrefix(string typeTitle, string itemTitle)
+        {
+            typeTitle = NormalizeDisciplineName(typeTitle);
+            itemTitle = NormalizeDisciplineName(itemTitle);
+            if (string.IsNullOrWhiteSpace(typeTitle))
+                return itemTitle;
+            if (string.IsNullOrWhiteSpace(itemTitle))
+                return typeTitle;
+
+            static string CapFirst(string s)
+            {
+                s = s.Trim();
+                if (s.Length == 0) return s;
+                var c = s[0];
+                return char.IsUpper(c) ? s : char.ToUpperInvariant(c) + s.Substring(1);
+            }
+
+            static string LowerFirst(string s)
+            {
+                s = s.Trim();
+                if (s.Length == 0) return s;
+                var c = s[0];
+                return char.IsLower(c) ? s : char.ToLowerInvariant(c) + s.Substring(1);
+            }
+
+            return CapFirst(typeTitle) + ", " + LowerFirst(itemTitle);
+        }
+
+        private static bool LooksLikePlanGiaDefensePreparationExcluded(string normalizedName)
+        {
+            var lower = normalizedName.ToLowerInvariant();
+            return lower.Contains("подготовк", StringComparison.Ordinal)
+                   && lower.Contains("процедур", StringComparison.Ordinal)
+                   && lower.Contains("защит", StringComparison.Ordinal);
+        }
+
+        private static bool LoosePlanPracticeNameEquals(string planName, string? cardName)
+        {
+            if (string.IsNullOrWhiteSpace(cardName))
+                return false;
+            var pa = NormalizeDisciplineName(planName).ToLowerInvariant();
+            var pb = NormalizeDisciplineName(cardName).ToLowerInvariant();
+            if (!pa.Contains("практик") || !pb.Contains("практик"))
+                return false;
+            if (!pa.Contains("профессиональ") && !pb.Contains("профессиональ"))
+                return false;
+
+            var a = NormalizeDisciplineNameForComparison(planName);
+            var b = NormalizeDisciplineNameForComparison(cardName);
+            return string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
         private const double PlanCardFuzzySimilarityThreshold = 0.82;
@@ -482,6 +569,159 @@ namespace Dekauto.Import.Service.Domain.Services
             return students;
         }
 
+        private static string GetMergedCellTextFromWorksheet(OfficeOpenXml.ExcelWorksheet worksheet, int row, int col)
+        {
+            var mergedAddress = worksheet.MergedCells[row, col];
+            if (!string.IsNullOrWhiteSpace(mergedAddress))
+                return worksheet.Cells[mergedAddress].First().Text;
+            return worksheet.Cells[row, col].Text;
+        }
+
+        /// <summary>Лист семейства «Практическая подготовка» (нейминг может отличаться по пробелам).</summary>
+        private static OfficeOpenXml.ExcelWorksheet? FindPracticePreparationWorksheet(ExcelWorkbook workbook)
+        {
+            foreach (var sheet in workbook.Worksheets)
+            {
+                var n = Regex.Replace(sheet?.Name ?? "", @"\s+", " ").Trim().ToLowerInvariant();
+                if (n.Contains("практическ") && n.Contains("подготовк"))
+                    return sheet;
+            }
+
+            return null;
+        }
+
+        /// <summary>Практики/ФТД с листа «Практическая подготовка» если по ПланСвод не установилась секция.</summary>
+        private static void OverlayPlanBucketsFromPracticePreparationSheet(ExcelPackage package, List<PlanDisciplineEntry> entries, bool enableFacultyParsing)
+        {
+            var ws = FindPracticePreparationWorksheet(package.Workbook);
+            if (ws?.Dimension == null || entries.Count == 0)
+                return;
+
+            var nameToBucket = new Dictionary<string, SupplementPlanBucket>(StringComparer.OrdinalIgnoreCase);
+            SupplementPlanBucket currentBucket = SupplementPlanBucket.Discipline;
+
+            int rowEnd = ws.Dimension.Rows;
+            for (int row = 4; row <= rowEnd; row++)
+            {
+                var anchorTxt = NormalizeDisciplineName(GetMergedCellTextFromWorksheet(ws, row, 1));
+                if (!string.IsNullOrWhiteSpace(anchorTxt))
+                {
+                    var sec = ResolvePlanSectionFromAnchor(anchorTxt);
+                    if (sec != SupplementPlanBucket.Unknown)
+                        currentBucket = sec;
+                }
+
+                var nameRaw = ws.Cells[row, 3].Text;
+                var disciplineName = NormalizeDisciplineName(nameRaw);
+                if (string.IsNullOrWhiteSpace(disciplineName))
+                    continue;
+
+                try
+                {
+                    if (ws.Cells[row, 3].Style.Font.Bold)
+                        continue;
+                }
+                catch { }
+
+                var inPlanMark = ws.Cells[row, 1].Text?.Replace('\u00A0', ' ').Trim() ?? "";
+                if (!string.Equals(inPlanMark, "+", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var codeCell = ws.Cells[row, 2].Text?.Replace('\u00A0', ' ').Trim() ?? "";
+                if (!LooksLikeSupplementPlanDisciplineCode(codeCell))
+                    continue;
+
+                if (IsSupplementPlanNoiseName(disciplineName))
+                    continue;
+
+                if (currentBucket == SupplementPlanBucket.Elective && !enableFacultyParsing)
+                    continue;
+
+                if (currentBucket != SupplementPlanBucket.Practice && currentBucket != SupplementPlanBucket.Elective)
+                    continue;
+
+                nameToBucket[disciplineName] = currentBucket;
+            }
+
+            foreach (var entry in entries)
+            {
+                if (entry.PlanBucket != SupplementPlanBucket.Discipline && entry.PlanBucket != SupplementPlanBucket.Unknown)
+                    continue;
+
+                var k = NormalizeDisciplineName(entry.DisciplineName);
+                if (string.IsNullOrWhiteSpace(k))
+                    continue;
+
+                if (!nameToBucket.TryGetValue(k, out var overlayBucket))
+                    continue;
+
+                if (overlayBucket == SupplementPlanBucket.Elective && !enableFacultyParsing)
+                    continue;
+
+                entry.PlanBucket = overlayBucket;
+            }
+        }
+
+        private static SupplementPlanBucket ResolvePlanSectionFromAnchor(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return SupplementPlanBucket.Unknown;
+            var t = Regex.Replace(raw, @"\s+", " ").Trim().ToLowerInvariant();
+            if (t.Contains("фтд") && (t.Contains("факультат") || t.Contains("факультатив")))
+                return SupplementPlanBucket.Elective;
+            var compact = Regex.Replace(t, @"\s+", "");
+            if (Regex.IsMatch(compact, @"блок3[\.\)].*(аттест|государств|итогов)",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                return SupplementPlanBucket.Gia;
+            if (t.Contains("блок") && t.Contains("2") && (t.Contains("практик") || t.Contains("практика")))
+                return SupplementPlanBucket.Practice;
+            if (t.Contains("блок") && t.Contains("1"))
+                return SupplementPlanBucket.Discipline;
+            return SupplementPlanBucket.Unknown;
+        }
+
+        private static bool LooksLikeSupplementPlanDisciplineCode(string? code)
+        {
+            if (string.IsNullOrWhiteSpace(code))
+                return false;
+            code = code.Trim();
+            if (code.Length == 0)
+                return false;
+            var c0 = char.ToUpperInvariant(code[0]);
+            if (c0 == '\u0411')
+                return true;
+            if (code.StartsWith("ФТД", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+
+        private static bool IsSupplementPlanNoiseName(string normalizedName)
+        {
+            if (string.IsNullOrWhiteSpace(normalizedName))
+                return true;
+            var lower = normalizedName.ToLowerInvariant();
+            if (lower.Contains("итого") && lower.Contains("семестр"))
+                return true;
+            if (lower.StartsWith("итого", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (string.Equals(lower, "в том числе:", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (string.Equals(lower, "в том числе", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+
+        /// <summary>Строки из карточки, которые не должны попадать в итог (шум без соответствия плану).</summary>
+        private static bool SkipLeftoverDisciplineAfterPlan(string? rawName)
+        {
+            var norm = NormalizeDisciplineName(rawName ?? "");
+            if (string.IsNullOrWhiteSpace(norm))
+                return true;
+            if (IsSupplementPlanNoiseName(norm))
+                return true;
+            return false;
+        }
+
         /// <summary>Ячейка "Свод" L8 - целевой объём ОП в з.е.</summary>
         private static async Task<double?> ReadTargetProgramCreditsFromPlanAsync(IFormFile plan)
         {
@@ -516,7 +756,457 @@ namespace Dekauto.Import.Service.Domain.Services
             return null;
         }
 
-        private async Task<List<PlanDisciplineEntry>> ParseStudyPlanForSupplementAsync(IFormFile plan)
+        private static bool IsPlanSvodBlock1TotalsAnchorLower(string anchorLower)
+        {
+            if (string.IsNullOrWhiteSpace(anchorLower))
+                return false;
+            var compact = Regex.Replace(anchorLower, @"\s+", "", RegexOptions.CultureInvariant);
+            return Regex.IsMatch(compact, @"блок1[\.\)].*(диск|модул)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        private static bool IsPlanSvodBlock2TotalsAnchorLower(string anchorLower)
+        {
+            if (string.IsNullOrWhiteSpace(anchorLower))
+                return false;
+            var compact = Regex.Replace(anchorLower, @"\s+", "", RegexOptions.CultureInvariant);
+            return Regex.IsMatch(compact, @"блок2[\.\)].*практ", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        private static bool IsPlanSvodBlock3TotalsAnchorLower(string anchorLower)
+        {
+            if (string.IsNullOrWhiteSpace(anchorLower))
+                return false;
+            var compact = Regex.Replace(anchorLower, @"\s+", "", RegexOptions.CultureInvariant);
+            return Regex.IsMatch(compact, @"блок3[\.\)].*(аттест|государств|итогов)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        /// <summary>Сумма строк «Конт. раб.» под заголовками блоков 1–3 листа «ПланСвод».</summary>
+        private static async Task<double?> ReadTargetContactHoursFromPlanBlockSummariesAsync(IFormFile plan)
+        {
+            using var stream = new MemoryStream();
+            await plan.CopyToAsync(stream);
+            stream.Position = 0;
+
+            using var package = new ExcelPackage(stream);
+            try
+            {
+                package.Workbook.Calculate();
+            }
+            catch
+            {
+                // как в карточке: сломанные ссылки — остаётся Text
+            }
+
+            var worksheet = package.Workbook.Worksheets["ПланСвод"];
+            if (worksheet?.Dimension == null)
+                return null;
+
+            static string NormalizeHeaderCell(string? value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    return string.Empty;
+                return Regex.Replace(value, @"\s+", " ").Trim();
+            }
+
+            static string NormalizeHeaderSquash(string value)
+                => NormalizeHeaderCell(value).ToLowerInvariant().Replace(" ", "");
+
+            string KontHeaderText(int row, int col)
+            {
+                var mergedAddress = worksheet.MergedCells[row, col];
+                if (!string.IsNullOrWhiteSpace(mergedAddress))
+                    return worksheet.Cells[mergedAddress].First().Text;
+                return worksheet.Cells[row, col].Text;
+            }
+
+            bool TryNumericFromCell(int row, int col, out double r)
+            {
+                r = default;
+                var cell = worksheet.Cells[row, col];
+                var value = cell.Value;
+
+                double FromObj(object v)
+                {
+                    if (v == null)
+                        return double.NaN;
+                    if (v is double d)
+                        return d;
+                    if (v is float f)
+                        return f;
+                    if (v is decimal dec)
+                        return (double)dec;
+                    if (v is int i)
+                        return i;
+                    if (v is long l)
+                        return l;
+                    var str = v.ToString()?.Trim();
+                    if (string.IsNullOrWhiteSpace(str))
+                        return double.NaN;
+                    str = str.Replace(" ", string.Empty).Replace(",", ".");
+                    return double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out var pv) ? pv : double.NaN;
+                }
+
+                var pv = FromObj(value);
+                if (!double.IsNaN(pv))
+                {
+                    r = pv;
+                    return true;
+                }
+
+                var tx = cell.Text?.Trim().Replace('\u00A0', ' ');
+                if (string.IsNullOrWhiteSpace(tx))
+                    return false;
+                tx = tx.Replace(" ", string.Empty).Replace(",", ".");
+                return double.TryParse(tx, NumberStyles.Any, CultureInfo.InvariantCulture, out r);
+            }
+
+            string GetMergedText(int row, int col)
+            {
+                var mergedAddress = worksheet.MergedCells[row, col];
+                if (!string.IsNullOrWhiteSpace(mergedAddress))
+                    return worksheet.Cells[mergedAddress].First().Text;
+                return worksheet.Cells[row, col].Text;
+            }
+
+            int columnCount = worksheet.Dimension.Columns;
+            int rowCount = worksheet.Dimension.Rows;
+            int? kontRabCol = null;
+
+            for (int col = 1; col <= columnCount; col++)
+            {
+                var header1 = NormalizeHeaderSquash(GetMergedText(1, col));
+                var header2 = NormalizeHeaderSquash(GetMergedText(2, col));
+                var mergedTopNotes = $"{header1} {header2}".Trim();
+
+                var h3Raw = NormalizeHeaderCell(KontHeaderText(3, col));
+                var h3 = NormalizeHeaderSquash(h3Raw);
+
+                bool topLooksItogo =
+                    mergedTopNotes.Contains("итого", StringComparison.OrdinalIgnoreCase)
+                    || mergedTopNotes.Contains("всего", StringComparison.OrdinalIgnoreCase);
+
+                bool looksKont =
+                    Regex.IsMatch(h3, @"конт\.раб", RegexOptions.IgnoreCase)
+                    || (h3.Contains("конт") && h3.Contains("раб") && !h3.Contains("роль"))
+                    ;
+
+                if (topLooksItogo && looksKont)
+                {
+                    kontRabCol = col;
+                    break;
+                }
+            }
+
+            if (kontRabCol == null)
+            {
+                for (int col = 1; col <= columnCount; col++)
+                {
+                    var h3 = NormalizeHeaderSquash(KontHeaderText(3, col));
+                    bool looksKont =
+                        Regex.IsMatch(h3, @"конт\.раб", RegexOptions.IgnoreCase)
+                        || (h3.Contains("конт") && h3.Contains("раб") && !h3.Contains("роль"))
+                        ;
+                    if (looksKont)
+                    {
+                        kontRabCol = col;
+                        break;
+                    }
+                }
+            }
+
+            if (kontRabCol == null)
+                return null;
+
+            bool got1 = false, got2 = false, got3 = false;
+            double sum = 0d;
+
+            for (int row = 4; row <= rowCount; row++)
+            {
+                string anchorRaw;
+                var mergedAddrA = worksheet.MergedCells[row, 1];
+                if (!string.IsNullOrWhiteSpace(mergedAddrA))
+                    anchorRaw = worksheet.Cells[mergedAddrA].First().Text;
+                else
+                    anchorRaw = worksheet.Cells[row, 1].Text;
+
+                var anchorLower = NormalizeDisciplineName(anchorRaw).ToLowerInvariant();
+
+                if (!IsPlanSvodBlock1TotalsAnchorLower(anchorLower)
+                    && !IsPlanSvodBlock2TotalsAnchorLower(anchorLower)
+                    && !IsPlanSvodBlock3TotalsAnchorLower(anchorLower))
+                {
+                    continue;
+                }
+
+                if (!TryNumericFromCell(row, kontRabCol.Value, out var cellVal))
+                    continue;
+
+                if (IsPlanSvodBlock1TotalsAnchorLower(anchorLower) && !got1)
+                {
+                    sum += cellVal;
+                    got1 = true;
+                }
+                else if (IsPlanSvodBlock2TotalsAnchorLower(anchorLower) && !got2)
+                {
+                    sum += cellVal;
+                    got2 = true;
+                }
+                else if (IsPlanSvodBlock3TotalsAnchorLower(anchorLower) && !got3)
+                {
+                    sum += cellVal;
+                    got3 = true;
+                }
+
+                if (got1 && got2 && got3)
+                    break;
+            }
+
+            if (!got1 || !got2 || !got3)
+                return null;
+            return sum;
+        }
+
+        /// <summary>Итого з.е. блока ГИА (ячейка «Факт» в строке-заголовке «Блок 3 …»).</summary>
+        private static async Task<double?> ReadTargetGiaCreditsFromPlanAsync(IFormFile plan)
+        {
+            using var stream = new MemoryStream();
+            await plan.CopyToAsync(stream);
+            stream.Position = 0;
+
+            using var package = new ExcelPackage(stream);
+            try
+            {
+                package.Workbook.Calculate();
+            }
+            catch
+            {
+            }
+
+            var worksheet = package.Workbook.Worksheets["ПланСвод"];
+            if (worksheet?.Dimension == null)
+                return null;
+
+            static string NormalizeHeaderCell(string? value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    return string.Empty;
+                return Regex.Replace(value, @"\s+", " ").Trim();
+            }
+
+            static string NormalizeHeaderSquash(string value)
+                => NormalizeHeaderCell(value).ToLowerInvariant().Replace(" ", string.Empty);
+
+            string KontHeaderText(int row, int col)
+            {
+                var mergedAddress = worksheet.MergedCells[row, col];
+                if (!string.IsNullOrWhiteSpace(mergedAddress))
+                    return worksheet.Cells[mergedAddress].First().Text;
+                return worksheet.Cells[row, col].Text;
+            }
+
+            bool TryNumericFromCell(int row, int col, out double r)
+            {
+                r = default;
+                var cell = worksheet.Cells[row, col];
+                var value = cell.Value;
+
+                double FromObj(object v)
+                {
+                    if (v == null)
+                        return double.NaN;
+                    if (v is double d)
+                        return d;
+                    if (v is float f)
+                        return f;
+                    if (v is decimal dec)
+                        return (double)dec;
+                    if (v is int i)
+                        return i;
+                    if (v is long l)
+                        return l;
+                    var str = v.ToString()?.Trim();
+                    if (string.IsNullOrWhiteSpace(str))
+                        return double.NaN;
+                    str = str.Replace(" ", string.Empty).Replace(",", ".");
+                    return double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out var pv) ? pv : double.NaN;
+                }
+
+                var pv = FromObj(value);
+                if (!double.IsNaN(pv))
+                {
+                    r = pv;
+                    return true;
+                }
+
+                var tx = cell.Text?.Trim().Replace('\u00A0', ' ');
+                if (string.IsNullOrWhiteSpace(tx))
+                    return false;
+                tx = tx.Replace(" ", string.Empty).Replace(",", ".");
+                return double.TryParse(tx, NumberStyles.Any, CultureInfo.InvariantCulture, out r);
+            }
+
+            int columnCount = worksheet.Dimension.Columns;
+            int rowCount = worksheet.Dimension.Rows;
+            int? faktZeCol = null;
+
+            for (int col = 1; col <= columnCount; col++)
+            {
+                var h3 = NormalizeHeaderSquash(KontHeaderText(3, col));
+                if (h3.Length == 0)
+                    continue;
+                // «Факт» под з.е.; не брать заголовки вроде «факультатив»
+                if (h3 == "факт")
+                {
+                    faktZeCol = col;
+                    break;
+                }
+            }
+
+            if (faktZeCol == null)
+                return null;
+
+            for (int row = 4; row <= rowCount; row++)
+            {
+                string anchorRaw;
+                var mergedAddrA = worksheet.MergedCells[row, 1];
+                if (!string.IsNullOrWhiteSpace(mergedAddrA))
+                    anchorRaw = worksheet.Cells[mergedAddrA].First().Text;
+                else
+                    anchorRaw = worksheet.Cells[row, 1].Text;
+
+                var anchorLower = NormalizeDisciplineName(anchorRaw).ToLowerInvariant();
+                if (!IsPlanSvodBlock3TotalsAnchorLower(anchorLower))
+                    continue;
+
+                if (TryNumericFromCell(row, faktZeCol.Value, out var v))
+                    return v;
+                return null;
+            }
+
+            return null;
+        }
+
+        /// <summary>Итого з.е. блока «Практика» из строки-заголовка «Блок 2 …» (колонка «Факт»).</summary>
+        private static async Task<double?> ReadTargetPracticeCreditsFromPlanAsync(IFormFile plan)
+        {
+            using var stream = new MemoryStream();
+            await plan.CopyToAsync(stream);
+            stream.Position = 0;
+
+            using var package = new ExcelPackage(stream);
+            try
+            {
+                package.Workbook.Calculate();
+            }
+            catch
+            {
+            }
+
+            var worksheet = package.Workbook.Worksheets["ПланСвод"];
+            if (worksheet?.Dimension == null)
+                return null;
+
+            static string NormalizeHeaderCell(string? value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    return string.Empty;
+                return Regex.Replace(value, @"\s+", " ").Trim();
+            }
+
+            static string NormalizeHeaderSquash(string value)
+                => NormalizeHeaderCell(value).ToLowerInvariant().Replace(" ", string.Empty);
+
+            string KontHeaderText(int row, int col)
+            {
+                var mergedAddress = worksheet.MergedCells[row, col];
+                if (!string.IsNullOrWhiteSpace(mergedAddress))
+                    return worksheet.Cells[mergedAddress].First().Text;
+                return worksheet.Cells[row, col].Text;
+            }
+
+            bool TryNumericFromCell(int row, int col, out double r)
+            {
+                r = default;
+                var cell = worksheet.Cells[row, col];
+                var value = cell.Value;
+
+                double FromObj(object v)
+                {
+                    if (v == null)
+                        return double.NaN;
+                    if (v is double d)
+                        return d;
+                    if (v is float f)
+                        return f;
+                    if (v is decimal dec)
+                        return (double)dec;
+                    if (v is int i)
+                        return i;
+                    if (v is long l)
+                        return l;
+                    var str = v.ToString()?.Trim();
+                    if (string.IsNullOrWhiteSpace(str))
+                        return double.NaN;
+                    str = str.Replace(" ", string.Empty).Replace(",", ".");
+                    return double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out var pv) ? pv : double.NaN;
+                }
+
+                var pv = FromObj(value);
+                if (!double.IsNaN(pv))
+                {
+                    r = pv;
+                    return true;
+                }
+
+                var tx = cell.Text?.Trim().Replace('\u00A0', ' ');
+                if (string.IsNullOrWhiteSpace(tx))
+                    return false;
+                tx = tx.Replace(" ", string.Empty).Replace(",", ".");
+                return double.TryParse(tx, NumberStyles.Any, CultureInfo.InvariantCulture, out r);
+            }
+
+            int columnCount = worksheet.Dimension.Columns;
+            int rowCount = worksheet.Dimension.Rows;
+            int? faktZeCol = null;
+
+            for (int col = 1; col <= columnCount; col++)
+            {
+                var h3 = NormalizeHeaderSquash(KontHeaderText(3, col));
+                if (h3.Length == 0)
+                    continue;
+                if (h3 == "факт")
+                {
+                    faktZeCol = col;
+                    break;
+                }
+            }
+
+            if (faktZeCol == null)
+                return null;
+
+            for (int row = 4; row <= rowCount; row++)
+            {
+                string anchorRaw;
+                var mergedAddrA = worksheet.MergedCells[row, 1];
+                if (!string.IsNullOrWhiteSpace(mergedAddrA))
+                    anchorRaw = worksheet.Cells[mergedAddrA].First().Text;
+                else
+                    anchorRaw = worksheet.Cells[row, 1].Text;
+
+                var anchorLower = NormalizeDisciplineName(anchorRaw).ToLowerInvariant();
+                if (!IsPlanSvodBlock2TotalsAnchorLower(anchorLower))
+                    continue;
+
+                if (TryNumericFromCell(row, faktZeCol.Value, out var v))
+                    return v;
+                return null;
+            }
+
+            return null;
+        }
+
+        private async Task<List<PlanDisciplineEntry>> ParseStudyPlanForSupplementAsync(IFormFile plan, bool enableFacultyParsing)
         {
             var result = new List<PlanDisciplineEntry>();
             using (var stream = new MemoryStream())
@@ -536,6 +1226,9 @@ namespace Dekauto.Import.Service.Domain.Services
 
                     var columnCount = worksheet.Dimension.Columns;
                     var rowCount = worksheet.Dimension.Rows;
+
+                    var currentSectionBucket = SupplementPlanBucket.Discipline;
+                    string? practiceTypePrefixBlock2 = null;
 
                     string GetMergedText(int row, int col)
                     {
@@ -666,16 +1359,48 @@ namespace Dekauto.Import.Service.Domain.Services
 
                     for (int row = 6; row <= rowCount; row++)
                     {
+                        var anchorTxt = NormalizeDisciplineName(GetMergedText(row, 1));
+                        if (!string.IsNullOrWhiteSpace(anchorTxt))
+                        {
+                            var sec = ResolvePlanSectionFromAnchor(anchorTxt);
+                            if (sec != SupplementPlanBucket.Unknown)
+                            {
+                                currentSectionBucket = sec;
+                                if (sec != SupplementPlanBucket.Practice)
+                                    practiceTypePrefixBlock2 = null;
+                            }
+                        }
+
                         var nameRaw = worksheet.Cells[row, 4].Text;
                         var disciplineName = NormalizeDisciplineName(nameRaw);
                         if (string.IsNullOrWhiteSpace(disciplineName))
                             continue;
 
-                        if (worksheet.Cells[row, 4].Style.Font.Bold)
+                        bool dBold = false;
+                        try { dBold = worksheet.Cells[row, 4].Style.Font.Bold; } catch { }
+
+                        if (currentSectionBucket == SupplementPlanBucket.Practice && dBold)
+                        {
+                            practiceTypePrefixBlock2 = disciplineName;
+                            continue;
+                        }
+
+                        if (dBold)
                             continue;
 
                         var inPlanMark = worksheet.Cells[row, 2].Text?.Replace('\u00A0', ' ').Trim() ?? string.Empty;
                         if (!string.Equals(inPlanMark, "+", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var codeCell = worksheet.Cells[row, 3].Text?.Replace('\u00A0', ' ').Trim() ?? string.Empty;
+                        if (!LooksLikeSupplementPlanDisciplineCode(codeCell))
+                            continue;
+
+                        if (IsSupplementPlanNoiseName(disciplineName))
+                            continue;
+
+                        if (currentSectionBucket == SupplementPlanBucket.Gia &&
+                            LooksLikePlanGiaDefensePreparationExcluded(disciplineName))
                             continue;
 
                         double? aud = null;
@@ -690,12 +1415,29 @@ namespace Dekauto.Import.Service.Domain.Services
                             bySem[kvp.Key] = ze;
                         }
 
+                        var bucket = currentSectionBucket;
+
+                        if (!enableFacultyParsing &&
+                            (bucket == SupplementPlanBucket.Elective ||
+                             codeCell.StartsWith("ФТД", StringComparison.OrdinalIgnoreCase)))
+                            continue;
+
+                        var finalDisciplineName = disciplineName;
+                        if (currentSectionBucket == SupplementPlanBucket.Practice &&
+                            !string.IsNullOrWhiteSpace(practiceTypePrefixBlock2))
+                        {
+                            finalDisciplineName = FormatPracticePlanNameWithTypePrefix(
+                                practiceTypePrefixBlock2,
+                                disciplineName);
+                        }
+
                         result.Add(new PlanDisciplineEntry
                         {
-                            DisciplineName = disciplineName,
+                            DisciplineName = finalDisciplineName,
                             PlanOrder = row,
                             TotalAudHours = aud,
-                            CreditUnitsBySemester = bySem
+                            CreditUnitsBySemester = bySem,
+                            PlanBucket = bucket
                         });
                     }
                 }
@@ -732,6 +1474,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     pool.Remove(chosen);
                     output.Add(new StudentDisciplineResult
                     {
+                        PlanBucket = pe.PlanBucket,
                         DisciplineName = planName,
                         PlanOrder = pe.PlanOrder,
                         AudHours = pe.TotalAudHours,
@@ -754,6 +1497,7 @@ namespace Dekauto.Import.Service.Domain.Services
                         pe.PlanOrder, planName);
                     output.Add(new StudentDisciplineResult
                     {
+                        PlanBucket = pe.PlanBucket,
                         DisciplineName = planName,
                         PlanOrder = pe.PlanOrder,
                         AudHours = pe.TotalAudHours,
@@ -778,6 +1522,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     pool.Remove(chosen);
                     output.Add(new StudentDisciplineResult
                     {
+                        PlanBucket = pe.PlanBucket,
                         DisciplineName = planName,
                         PlanOrder = pe.PlanOrder,
                         AudHours = pe.TotalAudHours,
@@ -800,6 +1545,97 @@ namespace Dekauto.Import.Service.Domain.Services
                         pe.PlanOrder, planName, relaxed.Count);
                     output.Add(new StudentDisciplineResult
                     {
+                        PlanBucket = pe.PlanBucket,
+                        DisciplineName = planName,
+                        PlanOrder = pe.PlanOrder,
+                        AudHours = pe.TotalAudHours,
+                        CreditUnits = totalCredits,
+                        Semester = planGuessSem,
+                        RequiresManualValidation = true
+                    });
+                    continue;
+                }
+
+                var truncatedPref = pool
+                    .Where(c => c.DisciplineName != null &&
+                        IsTruncatedPlanCardNamePrefixMatch(planName, c.DisciplineName))
+                    .ToList();
+
+                if (truncatedPref.Count == 1)
+                {
+                    var chosen = truncatedPref[0];
+                    pool.Remove(chosen);
+                    output.Add(new StudentDisciplineResult
+                    {
+                        PlanBucket = pe.PlanBucket,
+                        DisciplineName = planName,
+                        PlanOrder = pe.PlanOrder,
+                        AudHours = pe.TotalAudHours,
+                        CreditUnits = totalCredits,
+                        Score = chosen.Score,
+                        Semester = chosen.Semester ?? planGuessSem,
+                        Year = chosen.Year,
+                        ControlType = chosen.ControlType,
+                        RequiresManualValidation = false
+                    });
+                    continue;
+                }
+
+                if (truncatedPref.Count > 1)
+                {
+                    foreach (var t in truncatedPref)
+                        pool.Remove(t);
+                    logger.LogWarning(
+                        "План: PlanOrder={Order} «{Name}» — неоднозначное сопоставление по префиксу усечённого названия ({Count} строк карточки), оценка не проставляется.",
+                        pe.PlanOrder, planName, truncatedPref.Count);
+                    output.Add(new StudentDisciplineResult
+                    {
+                        PlanBucket = pe.PlanBucket,
+                        DisciplineName = planName,
+                        PlanOrder = pe.PlanOrder,
+                        AudHours = pe.TotalAudHours,
+                        CreditUnits = totalCredits,
+                        Semester = planGuessSem,
+                        RequiresManualValidation = true
+                    });
+                    continue;
+                }
+
+                var loosenedPractice = pool
+                    .Where(c => c.DisciplineName != null &&
+                        LoosePlanPracticeNameEquals(planName, c.DisciplineName))
+                    .ToList();
+
+                if (loosenedPractice.Count == 1)
+                {
+                    var chosen = loosenedPractice[0];
+                    pool.Remove(chosen);
+                    output.Add(new StudentDisciplineResult
+                    {
+                        PlanBucket = pe.PlanBucket,
+                        DisciplineName = planName,
+                        PlanOrder = pe.PlanOrder,
+                        AudHours = pe.TotalAudHours,
+                        CreditUnits = totalCredits,
+                        Score = chosen.Score,
+                        Semester = chosen.Semester ?? planGuessSem,
+                        Year = chosen.Year,
+                        ControlType = chosen.ControlType,
+                        RequiresManualValidation = false
+                    });
+                    continue;
+                }
+
+                if (loosenedPractice.Count > 1)
+                {
+                    foreach (var t in loosenedPractice)
+                        pool.Remove(t);
+                    logger.LogWarning(
+                        "План: PlanOrder={Order} «{Name}» — неоднозначное сопоставление усечённой практики ({Count} строк карточки), оценка не проставляется.",
+                        pe.PlanOrder, planName, loosenedPractice.Count);
+                    output.Add(new StudentDisciplineResult
+                    {
+                        PlanBucket = pe.PlanBucket,
                         DisciplineName = planName,
                         PlanOrder = pe.PlanOrder,
                         AudHours = pe.TotalAudHours,
@@ -821,6 +1657,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     pool.Remove(chosen);
                     output.Add(new StudentDisciplineResult
                     {
+                        PlanBucket = pe.PlanBucket,
                         DisciplineName = planName,
                         PlanOrder = pe.PlanOrder,
                         AudHours = pe.TotalAudHours,
@@ -843,6 +1680,7 @@ namespace Dekauto.Import.Service.Domain.Services
                         pe.PlanOrder, planName, fuzzy.Count);
                     output.Add(new StudentDisciplineResult
                     {
+                        PlanBucket = pe.PlanBucket,
                         DisciplineName = planName,
                         PlanOrder = pe.PlanOrder,
                         AudHours = pe.TotalAudHours,
@@ -856,6 +1694,7 @@ namespace Dekauto.Import.Service.Domain.Services
                 logger.LogWarning("План: дисциплина PlanOrder={Order} «{Name}» — нет соответствия в карточке.", pe.PlanOrder, planName);
                 output.Add(new StudentDisciplineResult
                 {
+                    PlanBucket = pe.PlanBucket,
                     DisciplineName = planName,
                     PlanOrder = pe.PlanOrder,
                     AudHours = pe.TotalAudHours,
@@ -867,9 +1706,18 @@ namespace Dekauto.Import.Service.Domain.Services
 
             foreach (var left in pool)
             {
-                logger.LogWarning("Карточка: дисциплина «{Name}» не сопоставлена со строкой плана, добавлена в конец списка.", left.DisciplineName ?? "(пусто)");
+                if (SkipLeftoverDisciplineAfterPlan(left.DisciplineName))
+                {
+                    logger.LogWarning(
+                        "Карточка: строка не сопоставлена с планом и отброшена как шум/служебная: «{Name}»",
+                        left.DisciplineName ?? "(пусто)");
+                    continue;
+                }
+
+                logger.LogWarning("Карточка: дисциплина «{Name}» не сопоставлена со строкой плана, будет отдельный блок в приложении.", left.DisciplineName ?? "(пусто)");
                 output.Add(new StudentDisciplineResult
                 {
+                    PlanBucket = left.PlanBucket,
                     DisciplineName = left.DisciplineName,
                     Score = left.Score,
                     Semester = left.Semester,
@@ -878,7 +1726,8 @@ namespace Dekauto.Import.Service.Domain.Services
                     AudHours = left.AudHours,
                     CreditUnits = left.CreditUnits,
                     PlanOrder = null,
-                    RequiresManualValidation = true
+                    RequiresManualValidation = true,
+                    IsCardOnlyUnmatchedPlan = true
                 });
             }
 
@@ -1637,7 +2486,26 @@ namespace Dekauto.Import.Service.Domain.Services
                     if (!string.IsNullOrWhiteSpace(courseText))
                         diplomaData.CourseOfTraining = courseText;
 
+                    var opopForSheet4 = NormalizeSupplementOpopSheetText(infoSheet.Cells[79, 3].Text);
+                    if (!string.IsNullOrWhiteSpace(opopForSheet4))
+                        diplomaData.SupplementAdditionalSheetOpopName = opopForSheet4;
+                    else
+                    {
+                        var fallbackOp = NormalizeSupplementOpopSheetText(courseText);
+                        if (!string.IsNullOrWhiteSpace(fallbackOp))
+                            diplomaData.SupplementAdditionalSheetOpopName = fallbackOp;
+                    }
+
+                    diplomaData.SupplementAdditionalSheetStudyFormLine =
+                        BuildSupplementStudyFormLine(infoSheet.Cells[76, 8].Text);
+
                     diplomaData.TargetProgramCredits = await ReadTargetProgramCreditsFromPlanAsync(plan);
+                    diplomaData.TargetContactHoursFromPlan = await ReadTargetContactHoursFromPlanBlockSummariesAsync(plan);
+                    diplomaData.TargetGiaCreditsFromPlan = await ReadTargetGiaCreditsFromPlanAsync(plan);
+                    diplomaData.TargetPracticeCreditsFromPlan = await ReadTargetPracticeCreditsFromPlanAsync(plan);
+
+                    var enableFacultyParsing = configuration.GetValue("EnableFacultyParsing", false);
+                    logger.LogInformation("EnableFacultyParsing={Enable}", enableFacultyParsing);
 
                     // 1. Парсинг основной инфо (как было)
                     var mappings = new Dictionary<(int row, int col), Action<string>>
@@ -1655,8 +2523,13 @@ namespace Dekauto.Import.Service.Domain.Services
                         setter(cell.Text);
                     }
 
-                    diplomaData.BirthdayDate = ObjectToDateOnly(firstSheet.Cells[6, 5].Value);
-                    diplomaData.EducationReceivedDate = ObjectToDateOnly(firstSheet.Cells[42, 8].Value);
+                    diplomaData.BirthdayDate = ReadSupplementSheetDateCell(firstSheet, 6, 5);
+                    diplomaData.EducationReceivedDate = ReadSupplementSheetDateCell(firstSheet, 42, 8);
+
+                    if (!diplomaData.BirthdayDate.HasValue)
+                        logger.LogWarning("Карточка supplement: нет даты рождения (лист «{Sheet}», ожидалась ячейка около строки 6).", firstSheet.Name);
+                    if (!diplomaData.EducationReceivedDate.HasValue)
+                        logger.LogWarning("Карточка supplement: нет даты документа об образовании (ожидалась строка около 42).");
 
                     // 2. Парсинг набора оценок (семестры)
                     var (disciplineGrades, honors) = ParseDisciplineGradesFromCard(package.Workbook.Worksheets);
@@ -1665,7 +2538,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     var finalizationResults = ParseFinalizationData(firstSheet);
 
                     // 4. Список дисциплин от учебного плана + сопоставление с карточкой
-                    var planEntries = await ParseStudyPlanForSupplementAsync(plan);
+                    var planEntries = await ParseStudyPlanForSupplementAsync(plan, enableFacultyParsing);
                     var fromPlan = BuildDisciplineResultsFromPlanAndCard(planEntries, disciplineGrades);
                     if (finalizationResults.Any())
                     {
@@ -1679,6 +2552,28 @@ namespace Dekauto.Import.Service.Domain.Services
             }
 
             return diplomaData;
+        }
+
+        private static string? NormalizeSupplementOpopSheetText(string? raw)
+        {
+            var s = NormalizeDisciplineName(raw ?? "");
+            if (string.IsNullOrWhiteSpace(s))
+                return null;
+            if (s.Length >= 2 && s.StartsWith('"') && s.EndsWith('"'))
+                s = s.Substring(1, s.Length - 2).Trim();
+            return string.IsNullOrWhiteSpace(s) ? null : s;
+        }
+
+        private static string? BuildSupplementStudyFormLine(string? rawFromCard)
+        {
+            if (string.IsNullOrWhiteSpace(rawFromCard))
+                return null;
+            var t = NormalizeDisciplineName(rawFromCard).ToLowerInvariant();
+            if (t.Contains("заоч"))
+                return "Форма обучения: заочное";
+            if (t.Contains("очн"))
+                return "Форма обучения: очное";
+            return "Форма обучения: " + NormalizeDisciplineName(rawFromCard);
         }
 
         private string Capitalize(string val)
@@ -1817,7 +2712,8 @@ namespace Dekauto.Import.Service.Domain.Services
                     disciplineName.Contains("Государственный экзамен", StringComparison.OrdinalIgnoreCase) ||
                     disciplineName.Contains("Учебная практик", StringComparison.OrdinalIgnoreCase) ||
                     disciplineName.Contains("научно-исследоват", StringComparison.OrdinalIgnoreCase) ||
-                    disciplineName.Contains("Производственная практик", StringComparison.OrdinalIgnoreCase))
+                    disciplineName.Contains("Производственная практик", StringComparison.OrdinalIgnoreCase) ||
+                    disciplineName.Contains("Практика по получению профессиональ", StringComparison.OrdinalIgnoreCase))
                 {
                     nonUniqueDisciplines.Add(result);
                 }
@@ -2395,6 +3291,19 @@ namespace Dekauto.Import.Service.Domain.Services
             if (lower.Contains("не")) return "2";
 
             return rawScore; // Возвращаем как есть, если не распознали
+        }
+
+        /// <summary>Дата для приложения диплома: сначала Value ячейки, если пусто — Text.</summary>
+        private DateOnly? ReadSupplementSheetDateCell(ExcelWorksheet sheet, int row, int col)
+        {
+            var cell = sheet.Cells[row, col];
+            var fromValue = ObjectToDateOnly(cell.Value, throwEx: false);
+            if (fromValue.HasValue)
+                return fromValue;
+            var t = cell.Text?.Trim();
+            if (!string.IsNullOrWhiteSpace(t))
+                return ObjectToDateOnly(t, throwEx: false);
+            return null;
         }
 
         /// <summary>

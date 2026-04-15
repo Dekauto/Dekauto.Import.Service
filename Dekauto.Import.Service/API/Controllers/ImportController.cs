@@ -183,6 +183,11 @@ namespace Dekauto.Import.Service.API.Controllers
                 logger.LogError(ex.Message);
                 return BadRequest(ex.Message);
             }
+            catch (FormatException ex)
+            {
+                logger.LogError(ex.Message);
+                return BadRequest(ex.Message);
+            }
             catch (InvalidOperationException ex)
             {
                 logger.LogError(ex.Message);

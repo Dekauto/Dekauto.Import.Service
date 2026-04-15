@@ -6,5 +6,8 @@ namespace Dekauto.Import.Service.Domain.Entities.DTO
         public int PlanOrder { get; set; }
         public double? TotalAudHours { get; set; }
         public Dictionary<int, double> CreditUnitsBySemester { get; set; } = new();
+
+        /// <summary>Из листа "ПланСвод": дисциплины модуля / блок практик / факультативы.</summary>
+        public SupplementPlanBucket PlanBucket { get; set; } = SupplementPlanBucket.Unknown;
     }
 }

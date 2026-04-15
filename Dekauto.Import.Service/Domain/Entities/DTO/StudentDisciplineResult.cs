@@ -1,7 +1,11 @@
+using Dekauto.Import.Service.Domain.Entities.DTO;
+
 namespace Dekauto.Import.Service.Domain.Entities
 {
     public class StudentDisciplineResult
     {
+        /// <summary>Из учебного плана; если null — только карточка или ГИА/прочее.</summary>
+        public SupplementPlanBucket? PlanBucket { get; set; }
         public string? DisciplineName { get; set; }
         public string? Score { get; set; }
         public short? Semester { get; set; }
@@ -14,5 +18,8 @@ namespace Dekauto.Import.Service.Domain.Entities
         public int? PlanOrder { get; set; }
 
         public bool RequiresManualValidation { get; set; }
+
+        /// <summary>Строка только из карточки, без пары в плане — выводится отдельным блоком в конце.</summary>
+        public bool IsCardOnlyUnmatchedPlan { get; set; }
     }
 }

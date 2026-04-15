@@ -19,6 +19,21 @@
         /// <summary>Целевой объём ОП в з.е. из листа «Свод» (например L8).</summary>
         public double? TargetProgramCredits { get; set; }
 
+        /// <summary>Сумма конт. раб. по блокам 1–3 «ПланСвод» (приоритет для итога ак. час.).</summary>
+        public double? TargetContactHoursFromPlan { get; set; }
+
+        /// <summary>Итого з.е. блока 3 (ГИА) из строки-заголовка «ПланСвод».</summary>
+        public double? TargetGiaCreditsFromPlan { get; set; }
+
+        /// <summary>Итого з.е. блока 2 «Практика» из строки «ПланСвод» (колонка «Факт»).</summary>
+        public double? TargetPracticeCreditsFromPlan { get; set; }
+
+        /// <summary>Наименование ОПОП для листа «4 доп.сведения», ячейка B6 (карточка ~C79).</summary>
+        public string? SupplementAdditionalSheetOpopName { get; set; }
+
+        /// <summary>Строка для B7 листа «4 доп.сведения»: «Форма обучения: …» (карточка ~H76).</summary>
+        public string? SupplementAdditionalSheetStudyFormLine { get; set; }
+
         // Наименования дисциплин (модулей), практик, курсовых работ
         // +Количество зачетных единиц / академических часов / астрономических часов
         // +Оценка
