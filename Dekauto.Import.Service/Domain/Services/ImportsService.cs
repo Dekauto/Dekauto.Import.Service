@@ -63,6 +63,119 @@ namespace Dekauto.Import.Service.Domain.Services
             return normalized;
         }
 
+        /// <summary>Первая строка ячейки кода индекса (в планах часто многострочный текст с переносами).</summary>
+        private static string SupplementPlanCodeCellFirstLine(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return string.Empty;
+            var t = raw.Replace('\u00A0', ' ').Trim();
+            var nl = t.IndexOfAny(new[] { '\r', '\n' });
+            if (nl >= 0)
+                t = t.Substring(0, nl).Trim();
+            return t;
+        }
+
+        private static string StripSyntheticCourseTopicFromCard(string? cardName)
+        {
+            if (string.IsNullOrWhiteSpace(cardName))
+                return string.Empty;
+            var s = NormalizeDisciplineName(cardName);
+            const string prefix = "НАЗВАНИЕ ДИСЦИПЛИНЫ \"";
+            if (s.Length > prefix.Length + 1 &&
+                s.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+                s.EndsWith("\"", StringComparison.Ordinal))
+            {
+                return s.Substring(prefix.Length, s.Length - prefix.Length - 1).Trim();
+            }
+            return s;
+        }
+
+        private static bool CardCourseWorkLooksLikePlaceholderTopic(StudentDisciplineResult c)
+        {
+            var topic = StripSyntheticCourseTopicFromCard(c.DisciplineName);
+            return string.IsNullOrWhiteSpace(topic) ||
+                   string.Equals(topic, "Тема курсовой работы", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool PlanNameLooksLikeCourseWorkPlanRow(string? planName)
+        {
+            if (string.IsNullOrWhiteSpace(planName))
+                return false;
+            var n = NormalizeDisciplineName(planName).ToLowerInvariant();
+            if (n.Contains("курсовая работа"))
+                return true;
+            if (n.Contains("курсовой проект"))
+                return true;
+            return false;
+        }
+
+        private bool IsSupplementPlanIncludedByInPlanMarker(string? rawMark)
+        {
+            var m = rawMark?.Replace('\u00A0', ' ').Trim() ?? "";
+
+            if (string.Equals(m, "+", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (configuration.GetValue("Import:SupplementStudyPlan:RequireExplicitPlusInPlan", false))
+                return false;
+
+            if (string.IsNullOrWhiteSpace(m))
+                return configuration.GetValue("Import:SupplementStudyPlan:TreatEmptyInPlanMarkerAsIncluded", true);
+
+            if (m == "-" || m == "–" || m == "—")
+                return false;
+            if (string.Equals(m, "нет", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var lower = m.ToLowerInvariant();
+            if (lower == "да" || lower == "1" || lower == "v")
+                return true;
+            if (m.Contains('✓') || m.Contains('✔') || m.Contains('☑'))
+                return true;
+
+            return false;
+        }
+
+        private static double DisciplineNameSimilarityRatioForMatch(string? planName, string? cardName)
+        {
+            var direct = DisciplineNameSimilarityRatio(planName, cardName);
+            var topic = StripSyntheticCourseTopicFromCard(cardName);
+            if (string.IsNullOrWhiteSpace(topic))
+                return direct;
+            var topicNorm = NormalizeDisciplineName(topic);
+            var cardNorm = NormalizeDisciplineName(cardName);
+            if (string.Equals(topicNorm, cardNorm, StringComparison.OrdinalIgnoreCase))
+                return direct;
+            var viaTopic = DisciplineNameSimilarityRatio(planName, topic);
+            return direct > viaTopic ? direct : viaTopic;
+        }
+
+        private static bool ExactPlanCardNameMatch(string planName, string? cardName)
+        {
+            if (string.IsNullOrWhiteSpace(cardName))
+                return false;
+            var pn = NormalizeDisciplineName(planName);
+            var cn = NormalizeDisciplineName(cardName);
+            if (string.Equals(pn, cn, StringComparison.OrdinalIgnoreCase))
+                return true;
+            var topic = StripSyntheticCourseTopicFromCard(cardName);
+            return !string.IsNullOrWhiteSpace(topic) &&
+                   string.Equals(pn, NormalizeDisciplineName(topic), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool RelaxedPlanCardNameMatch(string planName, string? cardName)
+        {
+            if (string.IsNullOrWhiteSpace(cardName))
+                return false;
+            var a = NormalizeDisciplineNameForComparison(planName);
+            var b = NormalizeDisciplineNameForComparison(cardName);
+            if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase))
+                return true;
+            var topic = StripSyntheticCourseTopicFromCard(cardName);
+            return !string.IsNullOrWhiteSpace(topic) &&
+                   string.Equals(a, NormalizeDisciplineNameForComparison(topic), StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool IsTruncatedPlanCardNamePrefixMatch(string planName, string? cardName, int minShorterLen = 30)
         {
             if (string.IsNullOrWhiteSpace(planName) || string.IsNullOrWhiteSpace(cardName))
@@ -591,7 +704,7 @@ namespace Dekauto.Import.Service.Domain.Services
         }
 
         /// <summary>Практики/ФТД с листа «Практическая подготовка» если по ПланСвод не установилась секция.</summary>
-        private static void OverlayPlanBucketsFromPracticePreparationSheet(ExcelPackage package, List<PlanDisciplineEntry> entries, bool enableFacultyParsing)
+        private void OverlayPlanBucketsFromPracticePreparationSheet(ExcelPackage package, List<PlanDisciplineEntry> entries, bool enableFacultyParsing)
         {
             var ws = FindPracticePreparationWorksheet(package.Workbook);
             if (ws?.Dimension == null || entries.Count == 0)
@@ -624,10 +737,10 @@ namespace Dekauto.Import.Service.Domain.Services
                 catch { }
 
                 var inPlanMark = ws.Cells[row, 1].Text?.Replace('\u00A0', ' ').Trim() ?? "";
-                if (!string.Equals(inPlanMark, "+", StringComparison.OrdinalIgnoreCase))
+                if (!IsSupplementPlanIncludedByInPlanMarker(inPlanMark))
                     continue;
 
-                var codeCell = ws.Cells[row, 2].Text?.Replace('\u00A0', ' ').Trim() ?? "";
+                var codeCell = SupplementPlanCodeCellFirstLine(ws.Cells[row, 2].Text);
                 if (!LooksLikeSupplementPlanDisciplineCode(codeCell))
                     continue;
 
@@ -682,6 +795,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
         private static bool LooksLikeSupplementPlanDisciplineCode(string? code)
         {
+            code = SupplementPlanCodeCellFirstLine(code);
             if (string.IsNullOrWhiteSpace(code))
                 return false;
             code = code.Trim();
@@ -689,6 +803,8 @@ namespace Dekauto.Import.Service.Domain.Services
                 return false;
             var c0 = char.ToUpperInvariant(code[0]);
             if (c0 == '\u0411')
+                return true;
+            if (c0 == 'B')
                 return true;
             if (code.StartsWith("ФТД", StringComparison.OrdinalIgnoreCase))
                 return true;
@@ -1222,10 +1338,32 @@ namespace Dekauto.Import.Service.Domain.Services
                         ?? throw new InvalidOperationException("Загруженный файл не содержит листа ПланСвод");
 
                     if (worksheet.Dimension == null)
+                    {
+                        logger.LogWarning("ПланСвод: Dimension=null, файл={FileName}, пустой результат.", plan.FileName);
                         return result;
+                    }
 
                     var columnCount = worksheet.Dimension.Columns;
                     var rowCount = worksheet.Dimension.Rows;
+
+                    static string PlanColLetter(int columnNumber)
+                    {
+                        if (columnNumber < 1)
+                            return "?";
+                        string letters = "";
+                        var n = columnNumber;
+                        while (n > 0)
+                        {
+                            n--;
+                            letters = (char)('A' + n % 26) + letters;
+                            n /= 26;
+                        }
+                        return letters;
+                    }
+
+                    logger.LogInformation(
+                        "ПланСвод: старт разбора листа «ПланСвод», файл={FileName}, строк данных до {RowMax}, колонок {ColMax}, EnableFacultyParsing={Faculty}",
+                        plan.FileName, rowCount, columnCount, enableFacultyParsing);
 
                     var currentSectionBucket = SupplementPlanBucket.Discipline;
                     string? practiceTypePrefixBlock2 = null;
@@ -1247,6 +1385,9 @@ namespace Dekauto.Import.Service.Domain.Services
 
                     int? audHoursCol = null;
                     var creditUnitsBySemesterCol = new Dictionary<int, int>();
+                    int? inPlanCol = null;
+                    int? codeCol = null;
+                    int? nameCol = null;
 
                     for (int col = 1; col <= columnCount; col++)
                     {
@@ -1256,26 +1397,73 @@ namespace Dekauto.Import.Service.Domain.Services
                         var header2Lower = header2.ToLower();
                         var header3Lower = header3.ToLower();
 
+                        if (inPlanCol == null && (header3Lower.Contains("считать") || header3Lower.Contains("в плане")))
+                        {
+                            inPlanCol = col;
+                            logger.LogDebug(
+                                "ПланСвод: колонка «Считать в плане» → {ColLetter} ({Col}), причина: строка3 содержит «считать»/«в плане», текст=\"{Header3}\"",
+                                PlanColLetter(col), col, header3);
+                        }
+                        else if (codeCol == null && header3Lower.Contains("индекс"))
+                        {
+                            codeCol = col;
+                            logger.LogDebug(
+                                "ПланСвод: колонка «Индекс» → {ColLetter} ({Col}), причина: строка3 содержит «индекс», текст=\"{Header3}\"",
+                                PlanColLetter(col), col, header3);
+                        }
+                        else if (nameCol == null && header3Lower.Contains("наименование"))
+                        {
+                            nameCol = col;
+                            logger.LogDebug(
+                                "ПланСвод: колонка «Наименование» → {ColLetter} ({Col}), причина: строка3 содержит «наименование», текст=\"{Header3}\"",
+                                PlanColLetter(col), col, header3);
+                        }
+
                         if (audHoursCol == null &&
                             (header2Lower.Contains("итого") || header2Lower.Contains("всего")) &&
                             Regex.IsMatch(header3Lower, @"\bауд\.?\b", RegexOptions.IgnoreCase))
                         {
                             audHoursCol = col;
+                            logger.LogDebug(
+                                "ПланСвод: колонка итого ауд. часов → {ColLetter} ({Col}): строка2=\"{H2}\", строка3=\"{H3}\"",
+                                PlanColLetter(col), col, header2, header3);
                             continue;
                         }
 
                         var matchSemester = Regex.Match(header2Lower, @"семестр\s*(\d{1,2})");
                         if (matchSemester.Success && (header3Lower.Contains("з.е") || header3Lower.Contains("з. е")))
                         {
-                            if (int.TryParse(matchSemester.Groups[1].Value, out var sem) && sem >= 1 && sem <= 8)
+                            if (int.TryParse(matchSemester.Groups[1].Value, out var sem) && sem >= 1 && sem <= 12)
                             {
                                 creditUnitsBySemesterCol[sem] = col;
+                                logger.LogDebug(
+                                    "ПланСвод: з.е. семестр {Sem} → колонка {ColLetter} ({Col}), строка2=\"{H2}\", строка3=\"{H3}\"",
+                                    sem, PlanColLetter(col), col, header2, header3);
                             }
+                        }
+                        else if (Regex.IsMatch(header2Lower, @"семестр\s*[аАaA]\b") &&
+                            (header3Lower.Contains("з.е") || header3Lower.Contains("з. е")))
+                        {
+                            creditUnitsBySemesterCol[10] = col;
+                            logger.LogDebug(
+                                "ПланСвод: з.е. семестр 10 (буква А) → колонка {ColLetter} ({Col}), строка2=\"{H2}\"",
+                                PlanColLetter(col), col, header2);
                         }
                     }
 
+                    if (inPlanCol == null || codeCol == null || nameCol == null)
+                        throw new InvalidOperationException("Не удалось определить колонки ПланСвод (Считать в плане / Индекс / Наименование)");
+
                     if (audHoursCol == null || creditUnitsBySemesterCol.Count == 0)
                         throw new InvalidOperationException("Не удалось определить колонки учебного плана (Ауд. часов/з.е. по семестрам)");
+
+                    var semMapForLog = string.Join(", ",
+                        creditUnitsBySemesterCol.OrderBy(kv => kv.Key).Select(kv =>
+                            $"семестр{kv.Key}={PlanColLetter(kv.Value)}{kv.Value}"));
+                    logger.LogInformation(
+                        "ПланСвод: карта колонок принята — СчитатьВПлане={InPlan} ({InPlanL}), Индекс={Code} ({CodeL}), Наименование={Name} ({NameL}), АудИтого={Aud} ({AudL}); з.е.: {SemMap}",
+                        inPlanCol, PlanColLetter(inPlanCol.Value), codeCol, PlanColLetter(codeCol.Value),
+                        nameCol, PlanColLetter(nameCol.Value), audHoursCol, PlanColLetter(audHoursCol.Value), semMapForLog);
 
                     bool TryGetIntCell(int row, int col, out int r)
                     {
@@ -1357,6 +1545,15 @@ namespace Dekauto.Import.Service.Domain.Services
                         return double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out r);
                     }
 
+                    var nSkipEmptyName = 0;
+                    var nSkipPracticeBoldPrefix = 0;
+                    var nSkipBoldHeader = 0;
+                    var nSkipNoPlus = 0;
+                    var nSkipBadCode = 0;
+                    var nSkipNoise = 0;
+                    var nSkipGiaExcluded = 0;
+                    var nSkipElectiveFtd = 0;
+
                     for (int row = 6; row <= rowCount; row++)
                     {
                         var anchorTxt = NormalizeDisciplineName(GetMergedText(row, 1));
@@ -1365,43 +1562,87 @@ namespace Dekauto.Import.Service.Domain.Services
                             var sec = ResolvePlanSectionFromAnchor(anchorTxt);
                             if (sec != SupplementPlanBucket.Unknown)
                             {
+                                var bucketOld = currentSectionBucket;
                                 currentSectionBucket = sec;
                                 if (sec != SupplementPlanBucket.Practice)
                                     practiceTypePrefixBlock2 = null;
+                                if (bucketOld != currentSectionBucket)
+                                {
+                                    logger.LogDebug(
+                                        "ПланСвод: строка {Row}, колонка A якорь «{Anchor}» → секция {Bucket} (было {Was})",
+                                        row, anchorTxt, currentSectionBucket, bucketOld);
+                                }
                             }
                         }
 
-                        var nameRaw = worksheet.Cells[row, 4].Text;
+                        var nameRaw = worksheet.Cells[row, nameCol.Value].Text;
                         var disciplineName = NormalizeDisciplineName(nameRaw);
                         if (string.IsNullOrWhiteSpace(disciplineName))
+                        {
+                            nSkipEmptyName++;
                             continue;
+                        }
 
                         bool dBold = false;
-                        try { dBold = worksheet.Cells[row, 4].Style.Font.Bold; } catch { }
+                        try { dBold = worksheet.Cells[row, nameCol.Value].Style.Font.Bold; } catch { }
 
                         if (currentSectionBucket == SupplementPlanBucket.Practice && dBold)
                         {
                             practiceTypePrefixBlock2 = disciplineName;
+                            nSkipPracticeBoldPrefix++;
+                            logger.LogDebug(
+                                "ПланСвод: строка {Row}, зафиксирован префикс практики (жирная строка блока 2): «{Prefix}»",
+                                row, disciplineName);
                             continue;
                         }
 
                         if (dBold)
+                        {
+                            nSkipBoldHeader++;
+                            logger.LogDebug(
+                                "ПланСвод: строка {Row}, пропуск жирной строки (заголовок/группа): «{Name}»",
+                                row, disciplineName);
                             continue;
+                        }
 
-                        var inPlanMark = worksheet.Cells[row, 2].Text?.Replace('\u00A0', ' ').Trim() ?? string.Empty;
-                        if (!string.Equals(inPlanMark, "+", StringComparison.OrdinalIgnoreCase))
+                        var inPlanMark = worksheet.Cells[row, inPlanCol.Value].Text?.Replace('\u00A0', ' ').Trim() ?? string.Empty;
+                        if (!IsSupplementPlanIncludedByInPlanMarker(inPlanMark))
+                        {
+                            nSkipNoPlus++;
+                            logger.LogDebug(
+                                "ПланСвод: строка {Row}, отметка «в плане» не проходит правило в {InPlanCol} ({InPlanL}), значение=\"{Mark}\", название «{Name}»",
+                                row, inPlanCol.Value, PlanColLetter(inPlanCol.Value), inPlanMark, disciplineName);
                             continue;
+                        }
 
-                        var codeCell = worksheet.Cells[row, 3].Text?.Replace('\u00A0', ' ').Trim() ?? string.Empty;
+                        var codeCell = SupplementPlanCodeCellFirstLine(worksheet.Cells[row, codeCol.Value].Text);
                         if (!LooksLikeSupplementPlanDisciplineCode(codeCell))
+                        {
+                            nSkipBadCode++;
+                            logger.LogDebug(
+                                "ПланСвод: строка {Row}, код в {CodeCol} ({CodeL}) не похож на индекс плана: «{Code}», название «{Name}»",
+                                row, codeCol.Value, PlanColLetter(codeCol.Value), codeCell, disciplineName);
                             continue;
+                        }
 
                         if (IsSupplementPlanNoiseName(disciplineName))
+                        {
+                            nSkipNoise++;
+                            logger.LogDebug(
+                                "ПланСвод: строка {Row}, служебная/итоговая строка по имени: «{Name}»",
+                                row, disciplineName);
                             continue;
+                        }
 
                         if (currentSectionBucket == SupplementPlanBucket.Gia &&
                             LooksLikePlanGiaDefensePreparationExcluded(disciplineName))
+                        {
+                            nSkipGiaExcluded++;
+                            logger.LogDebug(
+                                "ПланСвод: строка {Row}, ГИА: исключение по правилу подготовки к защите: «{Name}»",
+                                row, disciplineName);
                             continue;
+                        }
 
                         double? aud = null;
                         if (TryGetIntCell(row, audHoursCol.Value, out var hours))
@@ -1420,7 +1661,13 @@ namespace Dekauto.Import.Service.Domain.Services
                         if (!enableFacultyParsing &&
                             (bucket == SupplementPlanBucket.Elective ||
                              codeCell.StartsWith("ФТД", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            nSkipElectiveFtd++;
+                            logger.LogDebug(
+                                "ПланСвод: строка {Row}, пропуск факультатива/ФТД при EnableFacultyParsing=false: код «{Code}», bucket={Bucket}, «{Name}»",
+                                row, codeCell, bucket, disciplineName);
                             continue;
+                        }
 
                         var finalDisciplineName = disciplineName;
                         if (currentSectionBucket == SupplementPlanBucket.Practice &&
@@ -1431,6 +1678,14 @@ namespace Dekauto.Import.Service.Domain.Services
                                 disciplineName);
                         }
 
+                        var zeSummary = bySem.Count == 0
+                            ? "(нет чисел з.е.)"
+                            : string.Join(", ", bySem.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}:{kv.Value}"));
+
+                        logger.LogDebug(
+                            "ПланСвод: строка {Row} принята — код «{Code}», имя «{FinalName}», секция={Bucket}, ауд={Aud}, з.е.: {Ze}",
+                            row, codeCell, finalDisciplineName, bucket, aud, zeSummary);
+
                         result.Add(new PlanDisciplineEntry
                         {
                             DisciplineName = finalDisciplineName,
@@ -1439,6 +1694,25 @@ namespace Dekauto.Import.Service.Domain.Services
                             CreditUnitsBySemester = bySem,
                             PlanBucket = bucket
                         });
+                    }
+
+                    logger.LogInformation(
+                        "ПланСвод: конец разбора строк {RowFrom}-{RowTo}: записей в план {Added}; пропуски: пустоеНаименование={E}, префиксПрактикиЖирный={Pr}, жирныйЗаголовок={Bold}, нетПлюса={NoPlus}, кодНеИндекс={Bad}, шумИтоги={Noise}, гиаИсключено={Gia}, фтдПриОтклФакультатива={Ftd}",
+                        6, rowCount, result.Count, nSkipEmptyName, nSkipPracticeBoldPrefix, nSkipBoldHeader,
+                        nSkipNoPlus, nSkipBadCode, nSkipNoise, nSkipGiaExcluded, nSkipElectiveFtd);
+
+                    var approxDataRows = Math.Max(1, rowCount - 5);
+                    if (nSkipNoPlus > Math.Max(10, approxDataRows / 3))
+                    {
+                        logger.LogWarning(
+                            "ПланСвод: много строк отфильтровано по колонке «в плане» (счётчик={NoPlus}, ~строк данных={Approx}). Проверьте отметки в файле или Import:SupplementStudyPlan:RequireExplicitPlusInPlan / TreatEmptyInPlanMarkerAsIncluded.",
+                            nSkipNoPlus, approxDataRows);
+                    }
+                    if (nSkipBadCode > Math.Max(10, approxDataRows / 3))
+                    {
+                        logger.LogWarning(
+                            "ПланСвод: много строк с нераспознанным индексом (счётчик={Bad}, ~строк данных={Approx}). Часто в ячейке несколько строк или латинская «B» вместо «Б».",
+                            nSkipBadCode, approxDataRows);
                     }
                 }
             }
@@ -1453,6 +1727,23 @@ namespace Dekauto.Import.Service.Domain.Services
             var pool = new List<StudentDisciplineResult>(cardOnly);
             var output = new List<StudentDisciplineResult>();
 
+            var statExact = 0;
+            var statExactAmbiguous = 0;
+            var statRelaxed = 0;
+            var statRelaxedAmbiguous = 0;
+            var statTruncated = 0;
+            var statTruncatedAmbiguous = 0;
+            var statLoosenedPractice = 0;
+            var statLoosenedPracticeAmbiguous = 0;
+            var statCourseWorkBySemester = 0;
+            var statFuzzy = 0;
+            var statFuzzyAmbiguous = 0;
+            var statPlanRowNoCard = 0;
+
+            logger.LogInformation(
+                "План↔карточка: начало сопоставления, строк в учебном плане={PlanCount}, оценок из карточки (пул)={CardCount}",
+                planEntries.Count, cardOnly.Count);
+
             foreach (var pe in planEntries.OrderBy(p => p.PlanOrder))
             {
                 var planName = pe.DisciplineName;
@@ -1464,14 +1755,17 @@ namespace Dekauto.Import.Service.Domain.Services
                     planGuessSem = (short)pe.CreditUnitsBySemester.Where(kv => kv.Value > 0).OrderBy(kv => kv.Key).First().Key;
 
                 var exact = pool
-                    .Where(c => c.DisciplineName != null &&
-                        string.Equals(NormalizeDisciplineName(c.DisciplineName), NormalizeDisciplineName(planName), StringComparison.OrdinalIgnoreCase))
+                    .Where(c => c.DisciplineName != null && ExactPlanCardNameMatch(planName, c.DisciplineName))
                     .ToList();
 
                 if (exact.Count == 1)
                 {
+                    statExact++;
                     var chosen = exact[0];
                     pool.Remove(chosen);
+                    logger.LogDebug(
+                        "План↔карточка: PlanOrder={Order} «{Name}» — совпадение exact с карточкой «{CardName}», оценка={Score}",
+                        pe.PlanOrder, planName, chosen.DisciplineName, chosen.Score);
                     output.Add(new StudentDisciplineResult
                     {
                         PlanBucket = pe.PlanBucket,
@@ -1490,6 +1784,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
                 if (exact.Count > 1)
                 {
+                    statExactAmbiguous++;
                     foreach (var t in exact)
                         pool.Remove(t);
                     logger.LogWarning(
@@ -1509,17 +1804,17 @@ namespace Dekauto.Import.Service.Domain.Services
                 }
 
                 var relaxed = pool
-                    .Where(c => c.DisciplineName != null &&
-                        string.Equals(
-                            NormalizeDisciplineNameForComparison(c.DisciplineName),
-                            NormalizeDisciplineNameForComparison(planName),
-                            StringComparison.OrdinalIgnoreCase))
+                    .Where(c => c.DisciplineName != null && RelaxedPlanCardNameMatch(planName, c.DisciplineName))
                     .ToList();
 
                 if (relaxed.Count == 1)
                 {
+                    statRelaxed++;
                     var chosen = relaxed[0];
                     pool.Remove(chosen);
+                    logger.LogDebug(
+                        "План↔карточка: PlanOrder={Order} «{Name}» — совпадение relaxed (нормализация для сравнения) с «{CardName}»",
+                        pe.PlanOrder, planName, chosen.DisciplineName);
                     output.Add(new StudentDisciplineResult
                     {
                         PlanBucket = pe.PlanBucket,
@@ -1538,6 +1833,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
                 if (relaxed.Count > 1)
                 {
+                    statRelaxedAmbiguous++;
                     foreach (var t in relaxed)
                         pool.Remove(t);
                     logger.LogWarning(
@@ -1558,13 +1854,18 @@ namespace Dekauto.Import.Service.Domain.Services
 
                 var truncatedPref = pool
                     .Where(c => c.DisciplineName != null &&
-                        IsTruncatedPlanCardNamePrefixMatch(planName, c.DisciplineName))
+                        (IsTruncatedPlanCardNamePrefixMatch(planName, c.DisciplineName) ||
+                         IsTruncatedPlanCardNamePrefixMatch(planName, StripSyntheticCourseTopicFromCard(c.DisciplineName))))
                     .ToList();
 
                 if (truncatedPref.Count == 1)
                 {
+                    statTruncated++;
                     var chosen = truncatedPref[0];
                     pool.Remove(chosen);
+                    logger.LogDebug(
+                        "План↔карточка: PlanOrder={Order} «{Name}» — совпадение по префиксу усечённого названия с «{CardName}»",
+                        pe.PlanOrder, planName, chosen.DisciplineName);
                     output.Add(new StudentDisciplineResult
                     {
                         PlanBucket = pe.PlanBucket,
@@ -1583,6 +1884,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
                 if (truncatedPref.Count > 1)
                 {
+                    statTruncatedAmbiguous++;
                     foreach (var t in truncatedPref)
                         pool.Remove(t);
                     logger.LogWarning(
@@ -1608,8 +1910,12 @@ namespace Dekauto.Import.Service.Domain.Services
 
                 if (loosenedPractice.Count == 1)
                 {
+                    statLoosenedPractice++;
                     var chosen = loosenedPractice[0];
                     pool.Remove(chosen);
+                    logger.LogDebug(
+                        "План↔карточка: PlanOrder={Order} «{Name}» — совпадение loosenedPractice с «{CardName}»",
+                        pe.PlanOrder, planName, chosen.DisciplineName);
                     output.Add(new StudentDisciplineResult
                     {
                         PlanBucket = pe.PlanBucket,
@@ -1628,6 +1934,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
                 if (loosenedPractice.Count > 1)
                 {
+                    statLoosenedPracticeAmbiguous++;
                     foreach (var t in loosenedPractice)
                         pool.Remove(t);
                     logger.LogWarning(
@@ -1646,15 +1953,73 @@ namespace Dekauto.Import.Service.Domain.Services
                     continue;
                 }
 
+                if (PlanNameLooksLikeCourseWorkPlanRow(planName))
+                {
+                    var courseCandidates = pool
+                        .Where(c =>
+                            c.ControlType != null &&
+                            c.ControlType.IndexOf("курсов", StringComparison.OrdinalIgnoreCase) >= 0)
+                        .ToList();
+
+                    var narrowed = courseCandidates;
+                    if (narrowed.Count > 1)
+                    {
+                        var nonPlaceholder = narrowed.Where(c => !CardCourseWorkLooksLikePlaceholderTopic(c)).ToList();
+                        if (nonPlaceholder.Count == 1)
+                            narrowed = nonPlaceholder;
+                    }
+                    if (narrowed.Count > 1 && planGuessSem.HasValue)
+                    {
+                        var bySem = narrowed.Where(c => c.Semester == planGuessSem).ToList();
+                        if (bySem.Count == 1)
+                            narrowed = bySem;
+                    }
+
+                    if (narrowed.Count == 1)
+                    {
+                        statCourseWorkBySemester++;
+                        var chosen = narrowed[0];
+                        pool.Remove(chosen);
+                        logger.LogDebug(
+                            "План↔карточка: PlanOrder={Order} «{Name}» — курсовая по слоту плана ↔ «{CardName}» (контроль={Ctl}, сем={Sem})",
+                            pe.PlanOrder, planName, chosen.DisciplineName, chosen.ControlType, chosen.Semester);
+                        output.Add(new StudentDisciplineResult
+                        {
+                            PlanBucket = pe.PlanBucket,
+                            DisciplineName = planName,
+                            PlanOrder = pe.PlanOrder,
+                            AudHours = pe.TotalAudHours,
+                            CreditUnits = totalCredits,
+                            Score = chosen.Score,
+                            Semester = chosen.Semester ?? planGuessSem,
+                            Year = chosen.Year,
+                            ControlType = chosen.ControlType,
+                            RequiresManualValidation = false
+                        });
+                        continue;
+                    }
+
+                    if (narrowed.Count > 1)
+                    {
+                        logger.LogDebug(
+                            "План↔карточка: PlanOrder={Order} «{Name}» — слот курсовой неоднозначен ({Count} кандидатов в карточке), идём дальше по стратегиям.",
+                            pe.PlanOrder, planName, narrowed.Count);
+                    }
+                }
+
                 var fuzzy = pool
                     .Where(c => c.DisciplineName != null &&
-                        DisciplineNameSimilarityRatio(planName, c.DisciplineName) >= PlanCardFuzzySimilarityThreshold)
+                        DisciplineNameSimilarityRatioForMatch(planName, c.DisciplineName) >= PlanCardFuzzySimilarityThreshold)
                     .ToList();
 
                 if (fuzzy.Count == 1)
                 {
+                    statFuzzy++;
                     var chosen = fuzzy[0];
                     pool.Remove(chosen);
+                    logger.LogDebug(
+                        "План↔карточка: PlanOrder={Order} «{Name}» — fuzzy-сопоставление с «{CardName}» (порог сходства)",
+                        pe.PlanOrder, planName, chosen.DisciplineName);
                     output.Add(new StudentDisciplineResult
                     {
                         PlanBucket = pe.PlanBucket,
@@ -1673,6 +2038,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
                 if (fuzzy.Count > 1)
                 {
+                    statFuzzyAmbiguous++;
                     foreach (var t in fuzzy)
                         pool.Remove(t);
                     logger.LogWarning(
@@ -1691,6 +2057,24 @@ namespace Dekauto.Import.Service.Domain.Services
                     continue;
                 }
 
+                statPlanRowNoCard++;
+                var topCand = pool
+                    .Where(c => c.DisciplineName != null)
+                    .Select(c => (
+                        Card: c,
+                        Sim: DisciplineNameSimilarityRatioForMatch(planName, c.DisciplineName)))
+                    .OrderByDescending(t => t.Sim)
+                    .Take(3)
+                    .ToList();
+                if (topCand.Count > 0)
+                {
+                    logger.LogDebug(
+                        "План↔карточка: PlanOrder={Order} «{Name}» — нет соответствия; топ-{N} из пула карточки по похожести: {Top}",
+                        pe.PlanOrder, planName, topCand.Count,
+                        string.Join(" | ",
+                            topCand.Select(t =>
+                                $"«{t.Card.DisciplineName}» sim={t.Sim:0.###} сем={t.Card.Semester} тип={t.Card.ControlType}")));
+                }
                 logger.LogWarning("План: дисциплина PlanOrder={Order} «{Name}» — нет соответствия в карточке.", pe.PlanOrder, planName);
                 output.Add(new StudentDisciplineResult
                 {
@@ -1704,16 +2088,28 @@ namespace Dekauto.Import.Service.Domain.Services
                 });
             }
 
+            var statLeftoverNoise = 0;
+            var statLeftoverCardOnly = 0;
+
             foreach (var left in pool)
             {
                 if (SkipLeftoverDisciplineAfterPlan(left.DisciplineName))
                 {
+                    statLeftoverNoise++;
                     logger.LogWarning(
-                        "Карточка: строка не сопоставлена с планом и отброшена как шум/служебная: «{Name}»",
-                        left.DisciplineName ?? "(пусто)");
+                        "Карточка: строка не сопоставлена с планом и отброшена как шум/служебная: «{Name}», нормДляСравнения={NormCt}, сем={Sem}",
+                        left.DisciplineName ?? "(пусто)",
+                        NormalizeDisciplineNameForComparison(left.DisciplineName),
+                        left.Semester);
                     continue;
                 }
 
+                statLeftoverCardOnly++;
+                logger.LogDebug(
+                    "Карточка: хвост — «{Name}», темаИзСинтетики={Topic}, тип={Ctl}, сем={Sem}, оценка={Sc}",
+                    left.DisciplineName ?? "(пусто)",
+                    StripSyntheticCourseTopicFromCard(left.DisciplineName),
+                    left.ControlType, left.Semester, left.Score);
                 logger.LogWarning("Карточка: дисциплина «{Name}» не сопоставлена со строкой плана, будет отдельный блок в приложении.", left.DisciplineName ?? "(пусто)");
                 output.Add(new StudentDisciplineResult
                 {
@@ -1730,6 +2126,15 @@ namespace Dekauto.Import.Service.Domain.Services
                     IsCardOnlyUnmatchedPlan = true
                 });
             }
+
+            logger.LogInformation(
+                "План↔карточка: итог — строк результата={Out}; по стратегиям: exact={Ex}, exactНеодн={ExM}, relaxed={Rl}, relaxedНеодн={RlM}, префикс={Tr}, префиксНеодн={TrM}, практикаОслабл={Pr}, практикаНеодн={PrM}, курсоваяСлот={Crs}, fuzzy={Fz}, fuzzyНеодн={FzM}; строк плана без оценки из карточки={NoCard}; хвост карточки: отброшеноШум={Noise}, толькоКарточка={CardOnly}",
+                output.Count,
+                statExact, statExactAmbiguous, statRelaxed, statRelaxedAmbiguous,
+                statTruncated, statTruncatedAmbiguous, statLoosenedPractice, statLoosenedPracticeAmbiguous,
+                statCourseWorkBySemester,
+                statFuzzy, statFuzzyAmbiguous, statPlanRowNoCard,
+                statLeftoverNoise, statLeftoverCardOnly);
 
             return output;
         }
@@ -2539,6 +2944,9 @@ namespace Dekauto.Import.Service.Domain.Services
 
                     // 4. Список дисциплин от учебного плана + сопоставление с карточкой
                     var planEntries = await ParseStudyPlanForSupplementAsync(plan, enableFacultyParsing);
+                    logger.LogInformation(
+                        "Supplement: разбор ПланСвод завершён, записей плана={PlanN}; переход к сопоставлению с карточкой ({CardGrades} оценок).",
+                        planEntries.Count, disciplineGrades.Count);
                     var fromPlan = BuildDisciplineResultsFromPlanAndCard(planEntries, disciplineGrades);
                     if (finalizationResults.Any())
                     {
