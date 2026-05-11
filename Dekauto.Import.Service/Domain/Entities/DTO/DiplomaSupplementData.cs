@@ -34,6 +34,9 @@
         /// <summary>Строка для B7 листа «4 доп.сведения»: «Форма обучения: …» (карточка ~H76).</summary>
         public string? SupplementAdditionalSheetStudyFormLine { get; set; }
 
+        /// <summary>Квалификация для приложения «1 Обладатель диплома» B11 (карточка «ОбщСведения» ~C110).</summary>
+        public string? SupplementOwnerQualification { get; set; }
+
         // Наименования дисциплин (модулей), практик, курсовых работ
         // +Количество зачетных единиц / академических часов / астрономических часов
         // +Оценка

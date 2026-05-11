@@ -2891,9 +2891,13 @@ namespace Dekauto.Import.Service.Domain.Services
                     if (!string.IsNullOrWhiteSpace(courseText))
                         diplomaData.CourseOfTraining = courseText;
 
-                    var opopForSheet4 = NormalizeSupplementOpopSheetText(infoSheet.Cells[79, 3].Text);
-                    if (!string.IsNullOrWhiteSpace(opopForSheet4))
-                        diplomaData.SupplementAdditionalSheetOpopName = opopForSheet4;
+                    var qualFromC110 = NormalizeSupplementOpopSheetText(infoSheet.Cells[110, 3].Text);
+                    if (!string.IsNullOrWhiteSpace(qualFromC110))
+                        diplomaData.SupplementOwnerQualification = Capitalize(qualFromC110);
+
+                    var opopFromC79 = NormalizeSupplementOpopSheetText(infoSheet.Cells[79, 3].Text);
+                    if (!string.IsNullOrWhiteSpace(opopFromC79))
+                        diplomaData.SupplementAdditionalSheetOpopName = opopFromC79;
                     else
                     {
                         var fallbackOp = NormalizeSupplementOpopSheetText(courseText);
@@ -2980,7 +2984,7 @@ namespace Dekauto.Import.Service.Domain.Services
             if (t.Contains("заоч"))
                 return "Форма обучения: заочное";
             if (t.Contains("очн"))
-                return "Форма обучения: очное";
+                return "Форма обучения: очная";
             return "Форма обучения: " + NormalizeDisciplineName(rawFromCard);
         }
 
