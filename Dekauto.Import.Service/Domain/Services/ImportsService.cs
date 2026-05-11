@@ -2119,8 +2119,8 @@ namespace Dekauto.Import.Service.Domain.Services
                     Semester = left.Semester,
                     Year = left.Year,
                     ControlType = left.ControlType,
-                    AudHours = left.AudHours,
-                    CreditUnits = left.CreditUnits,
+                    AudHours = null,
+                    CreditUnits = null,
                     PlanOrder = null,
                     RequiresManualValidation = true,
                     IsCardOnlyUnmatchedPlan = true
