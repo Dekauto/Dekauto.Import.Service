@@ -1,5 +1,7 @@
-﻿using Dekauto.Import.Service.Domain.Entities;
+﻿using Dekauto.Import.Service.API.Models;
+using Dekauto.Import.Service.Domain.Entities;
 using Dekauto.Import.Service.Domain.Entities.Adapters;
+using Dekauto.Import.Service.Domain.Exceptions;
 using Dekauto.Import.Service.Domain.Entities.DTO;
 using Dekauto.Import.Service.Domain.Interfaces;
 using Microsoft.AspNetCore.Authorization;
@@ -126,6 +128,17 @@ namespace Dekauto.Import.Service.API.Controllers
             {
                 logger.LogError(ex.Message);
                 return BadRequest(ex.Message);
+            }
+            catch (StudentImportMismatchException ex)
+            {
+                logger.LogWarning(ex, "Несогласованность списков студентов между файлами импорта");
+                return BadRequest(new StudentImportMismatchResponse
+                {
+                    Message = ex.Message,
+                    SourceFileName = ex.SourceFileName,
+                    SourceFileRole = ex.SourceFileRole,
+                    MissingStudents = ex.MissingStudents.ToList()
+                });
             }
             catch (InvalidOperationException ex)
             {

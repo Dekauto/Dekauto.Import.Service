@@ -1,5 +1,6 @@
 ﻿using Dekauto.Import.Service.Domain.Entities;
 using Dekauto.Import.Service.Domain.Entities.DTO;
+using Dekauto.Import.Service.Domain.Exceptions;
 using Dekauto.Import.Service.Domain.Interfaces;
 using OfficeOpenXml;
 using System.Globalization;
@@ -16,6 +17,12 @@ namespace Dekauto.Import.Service.Domain.Services
         {
             this.configuration = configuration;
             this.logger = logger;
+        }
+
+        private static string FormatStudentDisplayName(Student student)
+        {
+            var s = $"{student.Surname} {student.Name} {student.Patronymic}".Trim();
+            return string.IsNullOrWhiteSpace(s) ? "(пустое ФИО)" : s;
         }
 
         private static string NormalizeDisciplineName(string? value)
@@ -2141,6 +2148,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
         public async Task<IEnumerable<Student>> GetStudentsJournal(IFormFile journal, List<Student> students)
         {
+            var missingInJournal = new List<Student>();
             using (var stream = new MemoryStream())
             {
                 await journal.CopyToAsync(stream);
@@ -2159,6 +2167,7 @@ namespace Dekauto.Import.Service.Domain.Services
 
                     foreach (var student in students)
                     {
+                        bool studentMatchedInFile = false;
                         string fio = $"{student.Surname}{student.Name}{student.Patronymic}".ToLower();
 
                         for (int row = 4; row <= rowCount; row++)
@@ -2175,6 +2184,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                     if (cellfio == fio)
                                     {
                                         isCurrentStudent = true;
+                                        studentMatchedInFile = true;
                                         break;
                                     }
                                 }
@@ -2204,9 +2214,19 @@ namespace Dekauto.Import.Service.Domain.Services
                                 }
                             }
                         }
+                        if (!studentMatchedInFile)
+                            missingInJournal.Add(student);
                     }
                 }
             }
+            if (missingInJournal.Count > 0)
+            {
+                throw new StudentImportMismatchException(
+                    "журнал зачётных книжек (3-й файл импорта, назначение групп)",
+                    journal.FileName,
+                    missingInJournal.Select(FormatStudentDisplayName).ToList());
+            }
+
             return students;
         }
 
