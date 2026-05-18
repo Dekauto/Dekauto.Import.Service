@@ -25,6 +25,194 @@ namespace Dekauto.Import.Service.Domain.Services
             return string.IsNullOrWhiteSpace(s) ? "(пустое ФИО)" : s;
         }
 
+        /// <summary>
+        /// Номер дома: только после маркера «д.» / «дом» и цифры (не путать с «д.» в типе нас. пункта и не брать длинные слова).
+        /// </summary>
+        private static string? ParseAddressHouseNumber(string address)
+        {
+            if (string.IsNullOrWhiteSpace(address))
+                return null;
+
+            var matches = Regex.Matches(
+                address,
+                @"(?:^|[,\s])(?:дом|д)\s*\.?\s*(\d[\w\-/]*)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+            if (matches.Count == 0)
+                return null;
+
+            var house = matches[matches.Count - 1].Groups[1].Value.Trim();
+            if (house.Length > 10)
+                house = house[..10];
+            return string.IsNullOrEmpty(house) ? null : house;
+        }
+
+        /// <summary>
+        /// Тип населённого пункта (г/с/х/д/п). Маркер «д. 15» (дом) не считается типом «деревня».
+        /// </summary>
+        private static string? ParseAddressSettlementTypeAbbrev(string address)
+        {
+            if (string.IsNullOrWhiteSpace(address))
+                return null;
+
+            var afterName = Regex.Match(
+                address,
+                @"\b([\p{L}\s\-]+?)\s+([гсхдп])(?:\.|\s|,|$)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (afterName.Success)
+                return afterName.Groups[2].Value.ToLowerInvariant();
+
+            var beforeName = Regex.Match(
+                address,
+                @"\b([гсхдп])\.(?!\s*\d)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (beforeName.Success)
+                return beforeName.Groups[1].Value.ToLowerInvariant();
+
+            return null;
+        }
+
+        private static void ApplyAddressSettlementType(Student student, string? abbr, bool isRegistration)
+        {
+            if (string.IsNullOrEmpty(abbr))
+                return;
+
+            var type = abbr switch
+            {
+                "г" => "город",
+                "с" => "село",
+                "х" => "хутор",
+                "д" => "деревня",
+                "п" => "посёлок",
+                _ => null
+            };
+
+            if (type == null)
+                return;
+
+            if (isRegistration)
+                student.AddressRegistrationType = type;
+            else
+                student.AddressResidentialType = type;
+        }
+
+        private static string NormalizeStatementSheetCellText(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+            return Regex.Replace(value.Trim(), @"\s+", " ", RegexOptions.CultureInvariant);
+        }
+
+        private static bool ContainsStatementDatePattern(string text) =>
+            Regex.IsMatch(text, @"\d{1,2}\.\d{1,2}\.\d{2,4}", RegexOptions.CultureInvariant);
+
+        /// <summary>
+        /// Явное указание курса в одной ячейке: «3 курс», «курс 3».
+        /// </summary>
+        private static bool TryExtractExplicitStatementCourseNumber(string? text, out int courseNum)
+        {
+            courseNum = default;
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            var explicitCourse = Regex.Match(
+                text,
+                @"(?:(\d)\s*[-–]?\s*курс|курс\s*(\d))",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!explicitCourse.Success)
+                return false;
+
+            var digits = explicitCourse.Groups[1].Success && !string.IsNullOrEmpty(explicitCourse.Groups[1].Value)
+                ? explicitCourse.Groups[1].Value
+                : explicitCourse.Groups[2].Value;
+            return int.TryParse(digits, out courseNum) && courseNum >= 1 && courseNum <= 6;
+        }
+
+        /// <summary>
+        /// Номер курса из текста ячейки: не брать части даты (02.02.2023) и годы.
+        /// </summary>
+        private static bool TryExtractStatementCourseNumber(string? text, out int courseNum)
+        {
+            courseNum = default;
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            if (TryExtractExplicitStatementCourseNumber(text, out courseNum))
+                return true;
+
+            // В ячейках с датой документа не угадываем курс по первому числу (02 → 2-й курс)
+            if (ContainsStatementDatePattern(text))
+                return false;
+
+            foreach (Match numberMatch in Regex.Matches(text, @"\d+"))
+            {
+                var idx = numberMatch.Index;
+                var len = numberMatch.Length;
+                if (idx > 0 && text[idx - 1] == '.')
+                    continue;
+                if (idx + len < text.Length && text[idx + len] == '.')
+                    continue;
+
+                if (numberMatch.Value.Length == 4
+                    && int.TryParse(numberMatch.Value, out var year)
+                    && year >= 1900
+                    && year <= 2100)
+                    continue;
+
+                if (int.TryParse(numberMatch.Value, out courseNum) && courseNum >= 1 && courseNum <= 6)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Строка 4 ведомости: «курс» и цифра часто в соседних ячейках; шапка с датой может быть в объединённой ячейке.
+        /// </summary>
+        private static bool TryExtractCourseFromStatementRow(
+            int row,
+            int columnCount,
+            Func<int, int, string> getCellText,
+            out int courseNum)
+        {
+            courseNum = default;
+
+            for (int col = 1; col <= columnCount; col++)
+            {
+                var text = NormalizeStatementSheetCellText(getCellText(row, col));
+                if (!text.Contains("курс", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (TryExtractExplicitStatementCourseNumber(text, out courseNum))
+                    return true;
+
+                foreach (var neighborCol in new[] { col + 1, col - 1, col + 2, col - 2 })
+                {
+                    if (neighborCol < 1 || neighborCol > columnCount)
+                        continue;
+
+                    var neighbor = NormalizeStatementSheetCellText(getCellText(row, neighborCol)).Trim();
+                    if (Regex.IsMatch(neighbor, @"^\d{1,2}$", RegexOptions.CultureInvariant)
+                        && int.TryParse(neighbor, out courseNum)
+                        && courseNum >= 1
+                        && courseNum <= 6)
+                        return true;
+                }
+            }
+
+            for (int col = 1; col <= columnCount; col++)
+            {
+                var raw = getCellText(row, col);
+                if (string.IsNullOrWhiteSpace(raw))
+                    continue;
+
+                if (TryExtractStatementCourseNumber(raw, out courseNum))
+                    return true;
+            }
+
+            return false;
+        }
+
         private static string NormalizeDisciplineName(string? value)
         {
             if (string.IsNullOrWhiteSpace(value))
@@ -2273,9 +2461,7 @@ namespace Dekauto.Import.Service.Domain.Services
                             var cellValue = worksheet.Cells[row, col].Value ?? "";
 
                             string indexPattern = @"\b\d{6}\b";
-                            string addressTypePattern = @"\b(?:\w+\s+(?<abbr>[гсхдп])\b|(?<abbr>[гсхдп])\.?\s+\w+\b)";
                             string cityPattern = @"\b(?:(?<city>[\w\s]+?)\s+[гсхдп]\,?|(?<type>[гсхдп])\.?\s*(?<city>[\w\s]+?))\b";
-                            string housePattern = @"(?:\bдом|д)\.?\s*(\w+)\b,?|\bд(\w+)\b";
                             string streetPattern = @",?\s*([^,]+?)\s*,\s*(?:дом|д)\.";
                             string housingTypePattern = @"(?:^|,)\s*(к(?:\.|орпус)?|стр(?:\.|оение)?)(?=\s*\w|$)(?!\w)";
                             string housingPattern = @"(?:^|,)\s*(?<type>к(?:\.|орпус)?|стр(?:\.|оение)?)\s*(?<number>[\w\-]*\d[\w\-]*)\b";
@@ -2399,37 +2585,24 @@ namespace Dekauto.Import.Service.Domain.Services
                                 case "адрес по прописке":
                                     if (cellValue.ToString() != "")
                                     {
-                                        student.AddressRegistrationIndex = Regex.Match(cellValue.ToString(), indexPattern).ToString();
-                                        student.AddressRegistrationCity = Regex.Match(cellValue.ToString(), cityPattern).Groups[1].ToString();
-                                        switch (Regex.Match(cellValue.ToString(), addressTypePattern).Groups[1].ToString())
-                                        {
-                                            case "г":
-                                                student.AddressRegistrationType = "город";
-                                                break;
-                                            case "с":
-                                                student.AddressRegistrationType = "село";
-                                                break;
-                                            case "х":
-                                                student.AddressRegistrationType = "хутор";
-                                                break;
-                                            case "д":
-                                                student.AddressRegistrationType = "деревня";
-                                                break;
-                                            case "п":
-                                                student.AddressRegistrationType = "посёлок";
-                                                break;
-                                        }
-                                        student.AddressRegistrationHouse = Regex.Match(cellValue.ToString(), housePattern).Groups[1].ToString();
-                                        student.AddressRegistrationStreet = Regex.Match(cellValue.ToString(), streetPattern).Groups[1].ToString().Trim();
-                                        string housingMatch = Regex.Match(cellValue.ToString(), housingTypePattern).Groups[1].ToString().Trim();
+                                        var registrationAddress = cellValue.ToString();
+                                        student.AddressRegistrationIndex = Regex.Match(registrationAddress, indexPattern).ToString();
+                                        student.AddressRegistrationCity = Regex.Match(registrationAddress, cityPattern).Groups[1].ToString();
+                                        ApplyAddressSettlementType(
+                                            student,
+                                            ParseAddressSettlementTypeAbbrev(registrationAddress),
+                                            isRegistration: true);
+                                        student.AddressRegistrationHouse = ParseAddressHouseNumber(registrationAddress);
+                                        student.AddressRegistrationStreet = Regex.Match(registrationAddress, streetPattern).Groups[1].ToString().Trim();
+                                        string housingMatch = Regex.Match(registrationAddress, housingTypePattern).Groups[1].ToString().Trim();
                                         if (housingMatch == "к" || housingMatch == "к." || housingMatch == "корпус" || housingMatch == "корпус.")
                                             student.AddressRegistrationHousingType = "корпус";
                                         else
                                             if (housingMatch == "стр" || housingMatch == "стр." || housingMatch == "строение" || housingMatch == "строение.")
                                             student.AddressRegistrationHousingType = "строение";
-                                        student.AddressRegistrationHousing = Regex.Match(cellValue.ToString(), housingPattern).Groups[2].ToString().Trim();
-                                        student.AddressRegistrationApartment = Regex.Match(cellValue.ToString(), apartementPattern).Groups[1].ToString().Trim();
-                                        student.AddressRegistrationOblKrayAvtobl = Regex.Match(cellValue.ToString(), regionPattern).Groups[1].ToString().Trim();
+                                        student.AddressRegistrationHousing = Regex.Match(registrationAddress, housingPattern).Groups[2].ToString().Trim();
+                                        student.AddressRegistrationApartment = Regex.Match(registrationAddress, apartementPattern).Groups[1].ToString().Trim();
+                                        student.AddressRegistrationOblKrayAvtobl = Regex.Match(registrationAddress, regionPattern).Groups[1].ToString().Trim();
 
                                     }
                                     break;
@@ -2437,37 +2610,24 @@ namespace Dekauto.Import.Service.Domain.Services
                                 case "адрес проживания":
                                     if (cellValue.ToString() != "")
                                     {
-                                        student.AddressResidentialIndex = Regex.Match(cellValue.ToString(), indexPattern).ToString();
-                                        student.AddressResidentialCity = Regex.Match(cellValue.ToString(), cityPattern).Groups[1].ToString();
-                                        switch (Regex.Match(cellValue.ToString(), addressTypePattern).Groups[1].ToString())
-                                        {
-                                            case "г":
-                                                student.AddressResidentialType = "город";
-                                                break;
-                                            case "с":
-                                                student.AddressResidentialType = "село";
-                                                break;
-                                            case "х":
-                                                student.AddressResidentialType = "хутор";
-                                                break;
-                                            case "д":
-                                                student.AddressResidentialType = "деревня";
-                                                break;
-                                            case "п":
-                                                student.AddressResidentialType = "посёлок";
-                                                break;
-                                        }
-                                        student.AddressResidentialHouse = Regex.Match(cellValue.ToString(), housePattern).Groups[1].ToString();
-                                        student.AddressResidentialStreet = Regex.Match(cellValue.ToString(), streetPattern).Groups[1].ToString().Trim();
-                                        string housingMatch = Regex.Match(cellValue.ToString(), housingTypePattern).Groups[1].ToString().Trim();
+                                        var residentialAddress = cellValue.ToString();
+                                        student.AddressResidentialIndex = Regex.Match(residentialAddress, indexPattern).ToString();
+                                        student.AddressResidentialCity = Regex.Match(residentialAddress, cityPattern).Groups[1].ToString();
+                                        ApplyAddressSettlementType(
+                                            student,
+                                            ParseAddressSettlementTypeAbbrev(residentialAddress),
+                                            isRegistration: false);
+                                        student.AddressResidentialHouse = ParseAddressHouseNumber(residentialAddress);
+                                        student.AddressResidentialStreet = Regex.Match(residentialAddress, streetPattern).Groups[1].ToString().Trim();
+                                        string housingMatch = Regex.Match(residentialAddress, housingTypePattern).Groups[1].ToString().Trim();
                                         if (housingMatch == "к" || housingMatch == "к." || housingMatch == "корпус" || housingMatch == "корпус.")
                                             student.AddressResidentialHousingType = "корпус";
                                         else
                                             if (housingMatch == "стр" || housingMatch == "стр." || housingMatch == "строение" || housingMatch == "строение.")
                                             student.AddressResidentialHousingType = "строение";
-                                        student.AddressResidentialHousing = Regex.Match(cellValue.ToString(), housingPattern).Groups[2].ToString().Trim();
-                                        student.AddressResidentialApartment = Regex.Match(cellValue.ToString(), apartementPattern).Groups[1].ToString().Trim();
-                                        student.AddressResidentialOblKrayAvtobl = Regex.Match(cellValue.ToString(), regionPattern).Groups[1].ToString().Trim();
+                                        student.AddressResidentialHousing = Regex.Match(residentialAddress, housingPattern).Groups[2].ToString().Trim();
+                                        student.AddressResidentialApartment = Regex.Match(residentialAddress, apartementPattern).Groups[1].ToString().Trim();
+                                        student.AddressResidentialOblKrayAvtobl = Regex.Match(residentialAddress, regionPattern).Groups[1].ToString().Trim();
 
                                     }
                                     break;
@@ -2688,28 +2848,17 @@ namespace Dekauto.Import.Service.Domain.Services
                             var isAutumnWinter = sessionRowText.Contains("осенне-зимняя") || sessionRowText.Contains("осенне зимняя");
                             var isSpringSummer = sessionRowText.Contains("весенне-летняя") || sessionRowText.Contains("весенне летняя");
 
-                            // Поиск номера курса в 4-й строке по всем столбцам
-                            int? courseNum = null;
-                            for (int col = 1; col <= columnCount; col++)
-                            {
-                                var courseCellText = GetMergedText(4, col);
-                                if (TryExtractFirstInt(courseCellText, out var num) && num >= 1 && num <= 6)
-                                {
-                                    courseNum = num;
-                                    break;
-                                }
-                            }
+                            // Номер курса — только из 4-й строки (не из года/даты в шапке)
+                            int? courseNum = TryExtractCourseFromStatementRow(4, columnCount, GetMergedText, out var parsedCourse)
+                                ? parsedCourse
+                                : null;
 
                             if (courseNum.HasValue && courseNum.Value > 0)
                             {
                                 var sem = courseNum.Value * 2;
                                 if (isAutumnWinter)
                                     sem -= 1;
-
-                                // Если сессия не распознана, всё равно можно определить семестр по формуле для весенне-летней,
-                                // но лучше оставлять null, чтобы не подставлять потенциально неверные данные.
-                                if (isAutumnWinter || isSpringSummer)
-                                    sheetSemester = (short)sem;
+                                sheetSemester = (short)sem;
                             }
                         }
 
