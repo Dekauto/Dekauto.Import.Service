@@ -629,7 +629,6 @@ namespace Dekauto.Import.Service.Domain.Services
                         return normalized.Contains("экспертное");
                     }
 
-                    int? audHoursCol = null;
                     var creditUnitsBySemesterCol = new Dictionary<int, int>();
 
                     for (int col = 1; col <= columnCount; col++)
@@ -639,16 +638,6 @@ namespace Dekauto.Import.Service.Domain.Services
 
                         var header2Lower = header2.ToLower();
                         var header3Lower = header3.ToLower();
-
-                        // "Ауд." находится в 3 строке заголовков, под ним — нужные значения для дисциплин
-                        // Обычно это колонка в блоке "Итого ... часов"
-                        if (audHoursCol == null &&
-                            (header2Lower.Contains("итого") || header2Lower.Contains("всего")) &&
-                            Regex.IsMatch(header3Lower, @"\bауд\.?\b", RegexOptions.IgnoreCase))
-                        {
-                            audHoursCol = col;
-                            continue;
-                        }
 
                         var matchSemester = Regex.Match(header2Lower, @"семестр\s*(\d{1,2})");
                         if (matchSemester.Success && (header3Lower.Contains("з.е") || header3Lower.Contains("з. е")))
@@ -660,13 +649,13 @@ namespace Dekauto.Import.Service.Domain.Services
                         }
                     }
 
-                    if (audHoursCol == null || creditUnitsBySemesterCol.Count == 0)
-                        throw new InvalidOperationException("Не удалось определить колонки учебного плана (Ауд. часов/з.е. по семестрам)");
+                    if (creditUnitsBySemesterCol.Count == 0)
+                        throw new InvalidOperationException("Не удалось определить колонки учебного плана (з.е. по семестрам)");
 
-                    bool TryGetIntCell(int row, int col, out int result)
+                    bool TryGetIntCell(ExcelWorksheet sourceWorksheet, int row, int col, out int result)
                     {
                         result = default;
-                        var value = worksheet.Cells[row, col].Value;
+                        var value = sourceWorksheet.Cells[row, col].Value;
                         if (value == null)
                             return false;
 
@@ -755,10 +744,6 @@ namespace Dekauto.Import.Service.Domain.Services
                         if (isModuleRow)
                             continue;
 
-                        int? audHours = null;
-                        if (TryGetIntCell(row, audHoursCol.Value, out var hours))
-                            audHours = hours;
-
                         foreach (var kvp in creditUnitsBySemesterCol)
                         {
                             var sem = (short)kvp.Key;
@@ -777,16 +762,17 @@ namespace Dekauto.Import.Service.Domain.Services
                                 if (target == null)
                                     continue;
 
-                                target.AudHours = audHours;
                                 target.CreditUnits = ze;
                             }
                         }
                     }
 
-                    // Извлечение типа контроля из листов Курс 1, Курс 2, Курс 3, Курс 4
+                    // Извлечение типа контроля и аудиторных часов из листов Курс 1, Курс 2, Курс 3, Курс 4
                     // Столбец 5 - название дисциплины
                     // Столбец 7 - вид контроля для нечётных семестров (1, 3, 5, 7)
-                    // Столбец 37 - вид контроля для чётных семестров (2, 4, 6, 8)
+                    // Столбец 22 - вид контроля для чётных семестров (2, 4, 6, 8)
+                    // Столбец 9 - аудиторные часы для нечётных семестров
+                    // Столбец 24 - аудиторные часы для чётных семестров
                     static string NormalizeControlType(string? value)
                     {
                         if (string.IsNullOrWhiteSpace(value))
@@ -822,51 +808,67 @@ namespace Dekauto.Import.Service.Domain.Services
 
                         var courseRowCount = courseSheet.Dimension.Rows;
 
-                        for (int row = 1; row <= courseRowCount; row++)
+                        // Строки дисциплин на листах «Курс N» начинаются с 6-й (как на ПланСвод)
+                        for (int row = 6; row <= courseRowCount; row++)
                         {
                             var nameRaw = courseSheet.Cells[row, 5].Text;
                             var disciplineName = NormalizeDisciplineName(nameRaw);
                             if (string.IsNullOrWhiteSpace(disciplineName))
                                 continue;
 
+                            var isModuleRow = courseSheet.Cells[row, 5].Style.Font.Bold;
+                            if (isModuleRow)
+                                continue;
+
                             // Вид контроля для нечётного семестра (столбец 7)
                             var oddControlRaw = courseSheet.Cells[row, 7].Text;
                             var oddControlType = NormalizeControlType(oddControlRaw);
+                            var hasOddHours = TryGetIntFromCourseSheetCell(courseSheet, row, 9, out var oddAudHours);
 
                             // Вид контроля для чётного семестра (столбец 22)
                             var evenControlRaw = courseSheet.Cells[row, 22].Text;
                             var evenControlType = NormalizeControlType(evenControlRaw);
+                            var hasEvenHours = TryGetIntFromCourseSheetCell(courseSheet, row, 24, out var evenAudHours);
 
                             foreach (var student in students)
                             {
-                                // Обновление для нечётного семестра
-                                if (!string.IsNullOrWhiteSpace(oddControlType))
-                                {
-                                    var targetOdd = student.DisciplineResults.FirstOrDefault(x =>
-                                        x.DisciplineName != null &&
-                                        x.Semester.HasValue &&
-                                        x.Semester.Value == oddSemester &&
-                                        NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(NormalizeDisciplineNameForComparison(disciplineName), StringComparison.OrdinalIgnoreCase));
+                                var targetOdd = student.DisciplineResults.FirstOrDefault(x =>
+                                    x.DisciplineName != null &&
+                                    x.Semester.HasValue &&
+                                    x.Semester.Value == oddSemester &&
+                                    NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(
+                                        NormalizeDisciplineNameForComparison(disciplineName),
+                                        StringComparison.OrdinalIgnoreCase));
 
-                                    if (targetOdd != null && string.IsNullOrWhiteSpace(targetOdd.ControlType))
-                                    {
-                                        targetOdd.ControlType = oddControlType;
-                                    }
+                                var targetEven = student.DisciplineResults.FirstOrDefault(x =>
+                                    x.DisciplineName != null &&
+                                    x.Semester.HasValue &&
+                                    x.Semester.Value == evenSemester &&
+                                    NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(
+                                        NormalizeDisciplineNameForComparison(disciplineName),
+                                        StringComparison.OrdinalIgnoreCase));
+
+                                if (targetOdd != null && !string.IsNullOrWhiteSpace(oddControlType) &&
+                                    string.IsNullOrWhiteSpace(targetOdd.ControlType))
+                                {
+                                    targetOdd.ControlType = oddControlType;
                                 }
 
-                                // Обновление для чётного семестра
-                                if (!string.IsNullOrWhiteSpace(evenControlType))
+                                if (targetEven != null && !string.IsNullOrWhiteSpace(evenControlType) &&
+                                    string.IsNullOrWhiteSpace(targetEven.ControlType))
                                 {
-                                    var targetEven = student.DisciplineResults.FirstOrDefault(x =>
-                                        x.DisciplineName != null &&
-                                        x.Semester.HasValue &&
-                                        x.Semester.Value == evenSemester &&
-                                        NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(NormalizeDisciplineNameForComparison(disciplineName), StringComparison.OrdinalIgnoreCase));
+                                    targetEven.ControlType = evenControlType;
+                                }
 
-                                    if (targetEven != null && string.IsNullOrWhiteSpace(targetEven.ControlType))
-                                    {
-                                        targetEven.ControlType = evenControlType;
-                                    }
+                                // Часы — только с листа «своего» курса; не перезаписываем уже найденное значение
+                                if (targetOdd != null && hasOddHours && !targetOdd.AudHours.HasValue)
+                                {
+                                    targetOdd.AudHours = oddAudHours;
+                                }
+
+                                if (targetEven != null && hasEvenHours && !targetEven.AudHours.HasValue)
+                                {
+                                    targetEven.AudHours = evenAudHours;
                                 }
                             }
                         }
@@ -883,6 +885,58 @@ namespace Dekauto.Import.Service.Domain.Services
             if (!string.IsNullOrWhiteSpace(mergedAddress))
                 return worksheet.Cells[mergedAddress].First().Text;
             return worksheet.Cells[row, col].Text;
+        }
+
+        private static bool TryGetIntFromCourseSheetCell(OfficeOpenXml.ExcelWorksheet worksheet, int row, int col, out int result)
+        {
+            result = default;
+            var text = GetMergedCellTextFromWorksheet(worksheet, row, col)?.Trim();
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                text = text.Replace(" ", string.Empty).Replace(",", ".");
+                if (double.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+                {
+                    result = (int)Math.Round(parsed);
+                    return true;
+                }
+            }
+
+            var value = worksheet.Cells[row, col].Value;
+            if (value == null)
+                return false;
+
+            if (value is int i)
+            {
+                result = i;
+                return true;
+            }
+            if (value is long l)
+            {
+                result = (int)l;
+                return true;
+            }
+            if (value is double d)
+            {
+                result = (int)Math.Round(d);
+                return true;
+            }
+            if (value is decimal dec)
+            {
+                result = (int)Math.Round((double)dec);
+                return true;
+            }
+
+            var str = value.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(str))
+                return false;
+            str = str.Replace(" ", string.Empty).Replace(",", ".");
+            if (double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedFromValue))
+            {
+                result = (int)Math.Round(parsedFromValue);
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>Лист семейства «Практическая подготовка» (нейминг может отличаться по пробелам).</summary>
