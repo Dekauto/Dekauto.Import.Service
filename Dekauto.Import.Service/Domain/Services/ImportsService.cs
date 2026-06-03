@@ -597,182 +597,14 @@ namespace Dekauto.Import.Service.Domain.Services
                     if (package.Workbook.Worksheets.Count == 0)
                         throw new InvalidOperationException("Загруженный файл не содержит листов");
 
-                    var worksheet = package.Workbook.Worksheets["ПланСвод"]
-                        ?? throw new InvalidOperationException("Загруженный файл не содержит листа ПланСвод");
-
-                    if (worksheet.Dimension == null)
-                        return students;
-
-                    var columnCount = worksheet.Dimension.Columns;
-                    var rowCount = worksheet.Dimension.Rows;
-
-                    string GetMergedText(int row, int col)
-                    {
-                        var mergedAddress = worksheet.MergedCells[row, col];
-                        if (!string.IsNullOrWhiteSpace(mergedAddress))
-                            return worksheet.Cells[mergedAddress].First().Text;
-                        return worksheet.Cells[row, col].Text;
-                    }
-
-                    static string NormalizePlanHeader(string? value)
-                    {
-                        if (string.IsNullOrWhiteSpace(value))
-                            return string.Empty;
-                        return Regex.Replace(value, @"\s+", " ").Trim();
-                    }
-
-                    static bool ContainsExpertHeader(string value)
-                    {
-                        if (string.IsNullOrWhiteSpace(value))
-                            return false;
-                        var normalized = value.ToLower().Replace(" ", string.Empty);
-                        return normalized.Contains("экспертное");
-                    }
-
-                    var creditUnitsBySemesterCol = new Dictionary<int, int>();
-
-                    for (int col = 1; col <= columnCount; col++)
-                    {
-                        var header2 = NormalizePlanHeader(GetMergedText(2, col));
-                        var header3 = NormalizePlanHeader(GetMergedText(3, col));
-
-                        var header2Lower = header2.ToLower();
-                        var header3Lower = header3.ToLower();
-
-                        var matchSemester = Regex.Match(header2Lower, @"семестр\s*(\d{1,2})");
-                        if (matchSemester.Success && (header3Lower.Contains("з.е") || header3Lower.Contains("з. е")))
-                        {
-                            if (int.TryParse(matchSemester.Groups[1].Value, out var sem) && sem >= 1 && sem <= 8)
-                            {
-                                creditUnitsBySemesterCol[sem] = col;
-                            }
-                        }
-                    }
-
-                    if (creditUnitsBySemesterCol.Count == 0)
-                        throw new InvalidOperationException("Не удалось определить колонки учебного плана (з.е. по семестрам)");
-
-                    bool TryGetIntCell(ExcelWorksheet sourceWorksheet, int row, int col, out int result)
-                    {
-                        result = default;
-                        var value = sourceWorksheet.Cells[row, col].Value;
-                        if (value == null)
-                            return false;
-
-                        if (value is int i)
-                        {
-                            result = i;
-                            return true;
-                        }
-                        if (value is long l)
-                        {
-                            result = (int)l;
-                            return true;
-                        }
-                        if (value is double d)
-                        {
-                            result = (int)Math.Round(d);
-                            return true;
-                        }
-                        if (value is decimal dec)
-                        {
-                            result = (int)Math.Round((double)dec);
-                            return true;
-                        }
-
-                        var str = value.ToString()?.Trim();
-                        if (string.IsNullOrWhiteSpace(str))
-                            return false;
-                        str = str.Replace(" ", string.Empty).Replace(",", ".");
-                        if (double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
-                        {
-                            result = (int)Math.Round(parsed);
-                            return true;
-                        }
-                        return false;
-                    }
-
-                    bool TryGetDoubleCell(int row, int col, out double result)
-                    {
-                        result = default;
-                        var value = worksheet.Cells[row, col].Value;
-                        if (value == null)
-                            return false;
-
-                        if (value is double d)
-                        {
-                            result = d;
-                            return true;
-                        }
-                        if (value is float f)
-                        {
-                            result = f;
-                            return true;
-                        }
-                        if (value is decimal dec)
-                        {
-                            result = (double)dec;
-                            return true;
-                        }
-                        if (value is int i)
-                        {
-                            result = i;
-                            return true;
-                        }
-                        if (value is long l)
-                        {
-                            result = l;
-                            return true;
-                        }
-
-                        var str = value.ToString()?.Trim();
-                        if (string.IsNullOrWhiteSpace(str))
-                            return false;
-                        str = str.Replace(" ", string.Empty).Replace(",", ".");
-                        return double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out result);
-                    }
-
-                    // Строки с дисциплинами начинаются с 6 строки, название — в 4 столбце
-                    for (int row = 6; row <= rowCount; row++)
-                    {
-                        var nameRaw = worksheet.Cells[row, 4].Text;
-                        var disciplineName = NormalizeDisciplineName(nameRaw);
-                        if (string.IsNullOrWhiteSpace(disciplineName))
-                            continue;
-
-                        var isModuleRow = worksheet.Cells[row, 4].Style.Font.Bold;
-                        if (isModuleRow)
-                            continue;
-
-                        foreach (var kvp in creditUnitsBySemesterCol)
-                        {
-                            var sem = (short)kvp.Key;
-                            var col = kvp.Value;
-                            if (!TryGetDoubleCell(row, col, out var ze))
-                                continue;
-
-                            foreach (var student in students)
-                            {
-                                var target = student.DisciplineResults.FirstOrDefault(x =>
-                                    x.DisciplineName != null &&
-                                    x.Semester.HasValue &&
-                                    x.Semester.Value == sem &&
-                                    NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(NormalizeDisciplineNameForComparison(disciplineName), StringComparison.OrdinalIgnoreCase));
-
-                                if (target == null)
-                                    continue;
-
-                                target.CreditUnits = ze;
-                            }
-                        }
-                    }
-
-                    // Извлечение типа контроля и аудиторных часов из листов Курс 1, Курс 2, Курс 3, Курс 4
-                    // Столбец 5 - название дисциплины
-                    // Столбец 7 - вид контроля для нечётных семестров (1, 3, 5, 7)
-                    // Столбец 22 - вид контроля для чётных семестров (2, 4, 6, 8)
-                    // Столбец 9 - аудиторные часы для нечётных семестров
-                    // Столбец 24 - аудиторные часы для чётных семестров
+                    // Извлечение типа контроля и часов из листов Курс 1…4
+                    // Столбец 5 — название дисциплины
+                    // Столбец 7 — вид контроля для нечётных семестров (1, 3, 5, 7)
+                    // Столбец 22 — вид контроля для чётных семестров (2, 4, 6, 8)
+                    // Столбец 8 — всего академических часов для нечётных семестров
+                    // Столбец 9 — контактные (аудиторные) часы для нечётных семестров
+                    // Столбец 23 — всего академических часов для чётных семестров
+                    // Столбец 24 — контактные (аудиторные) часы для чётных семестров
                     static string NormalizeControlType(string? value)
                     {
                         if (string.IsNullOrWhiteSpace(value))
@@ -816,19 +648,26 @@ namespace Dekauto.Import.Service.Domain.Services
                             if (string.IsNullOrWhiteSpace(disciplineName))
                                 continue;
 
-                            var isModuleRow = courseSheet.Cells[row, 5].Style.Font.Bold;
-                            if (isModuleRow)
-                                continue;
-
                             // Вид контроля для нечётного семестра (столбец 7)
                             var oddControlRaw = courseSheet.Cells[row, 7].Text;
                             var oddControlType = NormalizeControlType(oddControlRaw);
-                            var hasOddHours = TryGetIntFromCourseSheetCell(courseSheet, row, 9, out var oddAudHours);
+                            var hasOddTotalHours = TryGetIntFromCourseSheetCell(courseSheet, row, 8, out var oddTotalHours);
+                            var hasOddContactHours = TryGetIntFromCourseSheetCell(courseSheet, row, 9, out var oddContactHours);
 
                             // Вид контроля для чётного семестра (столбец 22)
                             var evenControlRaw = courseSheet.Cells[row, 22].Text;
                             var evenControlType = NormalizeControlType(evenControlRaw);
-                            var hasEvenHours = TryGetIntFromCourseSheetCell(courseSheet, row, 24, out var evenAudHours);
+                            var hasEvenTotalHours = TryGetIntFromCourseSheetCell(courseSheet, row, 23, out var evenTotalHours);
+                            var hasEvenContactHours = TryGetIntFromCourseSheetCell(courseSheet, row, 24, out var evenContactHours);
+
+                            var isBoldRow = courseSheet.Cells[row, 5].Style.Font.Bold;
+                            var hasAnyAcademicData = !string.IsNullOrWhiteSpace(oddControlType) ||
+                                                     !string.IsNullOrWhiteSpace(evenControlType) ||
+                                                     hasOddTotalHours || hasEvenTotalHours ||
+                                                     hasOddContactHours || hasEvenContactHours;
+                            // Жирные заголовки модулей без данных пропускаем; реальные дисциплины (в т.ч. НИР) — обрабатываем
+                            if (isBoldRow && !hasAnyAcademicData)
+                                continue;
 
                             foreach (var student in students)
                             {
@@ -860,15 +699,24 @@ namespace Dekauto.Import.Service.Domain.Services
                                     targetEven.ControlType = evenControlType;
                                 }
 
-                                // Часы — только с листа «своего» курса; не перезаписываем уже найденное значение
-                                if (targetOdd != null && hasOddHours && !targetOdd.AudHours.HasValue)
+                                if (targetOdd != null && hasOddTotalHours && !targetOdd.TotalHours.HasValue)
                                 {
-                                    targetOdd.AudHours = oddAudHours;
+                                    targetOdd.TotalHours = oddTotalHours;
                                 }
 
-                                if (targetEven != null && hasEvenHours && !targetEven.AudHours.HasValue)
+                                if (targetEven != null && hasEvenTotalHours && !targetEven.TotalHours.HasValue)
                                 {
-                                    targetEven.AudHours = evenAudHours;
+                                    targetEven.TotalHours = evenTotalHours;
+                                }
+
+                                if (targetOdd != null && hasOddContactHours && !targetOdd.AudHours.HasValue)
+                                {
+                                    targetOdd.AudHours = oddContactHours;
+                                }
+
+                                if (targetEven != null && hasEvenContactHours && !targetEven.AudHours.HasValue)
+                                {
+                                    targetEven.AudHours = evenContactHours;
                                 }
                             }
                         }

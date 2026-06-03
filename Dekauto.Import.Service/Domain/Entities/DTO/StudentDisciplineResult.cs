@@ -13,6 +13,8 @@ namespace Dekauto.Import.Service.Domain.Entities
         public string? ControlType { get; set; }
 
         public double? AudHours { get; set; }
+        /// <summary>Общая трудоёмкость (акад. часы), листы «Курс N» — столбцы 8 и 23.</summary>
+        public double? TotalHours { get; set; }
         public double? CreditUnits { get; set; }
 
         public int? PlanOrder { get; set; }
