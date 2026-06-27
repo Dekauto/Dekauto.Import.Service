@@ -1,4 +1,4 @@
-﻿using Dekauto.Import.Service.API.Models;
+using Dekauto.Import.Service.API.Models;
 using Dekauto.Import.Service.Domain.Entities;
 using Dekauto.Import.Service.Domain.Entities.DTO;
 using Dekauto.Import.Service.Domain.Exceptions;
@@ -97,11 +97,30 @@ namespace Dekauto.Import.Service.Domain.Services
                 student.AddressResidentialType = type;
         }
 
-        private static string NormalizeStatementSheetCellText(string? value)
+        private static string CollapseInnerWhitespace(string? value)
         {
             if (string.IsNullOrWhiteSpace(value))
                 return string.Empty;
             return Regex.Replace(value.Trim(), @"\s+", " ", RegexOptions.CultureInvariant);
+        }
+
+        /// <summary>Сжимает пробелы в строковых значениях ячеек; числа и даты не трогаем.</summary>
+        private static object NormalizeImportCellValue(object? cellValue)
+        {
+            if (cellValue == null)
+                return string.Empty;
+
+            return cellValue switch
+            {
+                DateTime or DateTimeOffset or bool or double or float or decimal or int or long or short or byte =>
+                    cellValue,
+                _ => CollapseInnerWhitespace(cellValue.ToString())
+            };
+        }
+
+        private static string NormalizeStatementSheetCellText(string? value)
+        {
+            return CollapseInnerWhitespace(value);
         }
 
         private static bool ContainsStatementDatePattern(string text) =>
@@ -216,9 +235,98 @@ namespace Dekauto.Import.Service.Domain.Services
 
         private static string NormalizeDisciplineName(string? value)
         {
+            return CollapseInnerWhitespace(value);
+        }
+
+        private static bool IsNumericDisciplineHeaderName(string? value)
+        {
             if (string.IsNullOrWhiteSpace(value))
-                return string.Empty;
-            return Regex.Replace(value, @"\s+", " ").Trim();
+                return false;
+            return Regex.IsMatch(value.Trim(), @"^\d+([.,]\d+)?$", RegexOptions.CultureInvariant);
+        }
+
+        private static bool IsStatementCourseWorkDiscipline(string? disciplineName)
+        {
+            if (string.IsNullOrWhiteSpace(disciplineName))
+                return false;
+
+            var lower = disciplineName.ToLowerInvariant();
+            return lower.Contains("курсовая работа", StringComparison.Ordinal)
+                   || lower.Contains("курсовой проект", StringComparison.Ordinal);
+        }
+
+        /// <summary>Порог нечёткого сравнения для практик (составное название из плана короче, чем в ведомости).</summary>
+        private const double PlanPracticeFuzzySimilarityThreshold = 0.6;
+
+        /// <summary>Минимальная длина короткой строки, при которой допускаем префиксное совпадение практик.</summary>
+        private const int PlanPracticePrefixMinLength = 20;
+
+        /// <summary>
+        /// Оценка совпадения составного названия практики из плана и названия практики из ведомости.
+        /// Префиксное совпадение (одно начинается с другого) трактуется как точное.
+        /// </summary>
+        private static double PracticePlanNameScore(string planComposite, string? statementName)
+        {
+            if (string.IsNullOrWhiteSpace(statementName))
+                return 0d;
+
+            var a = NormalizeDisciplineName(planComposite).ToLowerInvariant();
+            var b = NormalizeDisciplineName(statementName).ToLowerInvariant();
+            if (a.Length == 0 || b.Length == 0)
+                return 0d;
+
+            var shorter = a.Length <= b.Length ? a : b;
+            var longer = a.Length <= b.Length ? b : a;
+            if (shorter.Length >= PlanPracticePrefixMinLength && longer.StartsWith(shorter, StringComparison.Ordinal))
+                return 1d;
+
+            return DisciplineNameSimilarityRatio(planComposite, statementName);
+        }
+
+        private static StudentDisciplineResult? FindPlanMatchInStatementResults(
+            IReadOnlyList<StudentDisciplineResult> results,
+            short semester,
+            string disciplineName,
+            string? practiceCompositeName)
+        {
+            var candidates = results.Where(x =>
+                x.DisciplineName != null &&
+                x.Semester.HasValue &&
+                x.Semester.Value == semester &&
+                !string.Equals(x.ControlType, "курсовая", StringComparison.OrdinalIgnoreCase)).ToList();
+
+            // 1) Обычное точное сопоставление по нормализованному названию (как для обычных дисциплин).
+            var planKey = NormalizeDisciplineNameForComparison(disciplineName);
+            var exact = candidates.FirstOrDefault(x =>
+                NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(
+                    planKey,
+                    StringComparison.OrdinalIgnoreCase));
+            if (exact != null)
+                return exact;
+
+            // 2) Для практик — нечёткое сопоставление по составному названию (надзаголовок + НИР),
+            //    только против практик ведомости, чтобы не задевать обычные дисциплины.
+            if (!string.IsNullOrWhiteSpace(practiceCompositeName))
+            {
+                StudentDisciplineResult? best = null;
+                var bestScore = 0d;
+                foreach (var candidate in candidates)
+                {
+                    if (!string.Equals(candidate.ControlType, "практика", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var score = PracticePlanNameScore(practiceCompositeName, candidate.DisciplineName);
+                    if (score >= PlanPracticeFuzzySimilarityThreshold && score > bestScore)
+                    {
+                        bestScore = score;
+                        best = candidate;
+                    }
+                }
+
+                return best;
+            }
+
+            return null;
         }
 
         private static string NormalizeDisciplineNameForComparison(string? value)
@@ -491,7 +599,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     var headers = new List<string>();
                     for (int col = 1; col <= columnCount; col++)
                     {
-                        headers.Add(worksheet.Cells[1, col].Text);
+                        headers.Add(CollapseInnerWhitespace(worksheet.Cells[1, col].Text));
                     }
                     if (students.Count == 0 || students == null) throw new ArgumentNullException("Студенты отсутствуют в таблице личных дел");
                     foreach (var student in students)
@@ -505,7 +613,7 @@ namespace Dekauto.Import.Service.Domain.Services
                             for (int col = 1; col <= columnCount; col++)
                             {
                                 var header = headers[col - 1];
-                                var cellValue = worksheet.Cells[row, col].Value ?? "";
+                                var cellValue = NormalizeImportCellValue(worksheet.Cells[row, col].Value);
 
                                 if (header.ToLower() == "фио обучающегося" || header.ToLower() == "фио студента")
                                 {
@@ -520,7 +628,7 @@ namespace Dekauto.Import.Service.Domain.Services
                             for (int col = 1; col <= columnCount; col++)
                             {
                                 var header = headers[col - 1];
-                                var cellValue = worksheet.Cells[row, col].Value ?? "";
+                                var cellValue = NormalizeImportCellValue(worksheet.Cells[row, col].Value);
 
                                 logger.LogInformation($"Работа с ячейкой: [{col},{row}]; столбец {header}");
 
@@ -611,19 +719,19 @@ namespace Dekauto.Import.Service.Domain.Services
                         if (string.IsNullOrWhiteSpace(value))
                             return string.Empty;
 
-                        var normalized = value.Trim().ToLower();
+                        var normalized = CollapseInnerWhitespace(value).ToLowerInvariant();
 
-                        // Эк КР -> экзамен, курсовая работа
-                        if (normalized.Contains("эк") && normalized.Contains("кр"))
-                            return "экзамен, курсовая";
+                        if (normalized == "зао")
+                            return "зачёт с оценкой";
+                        if (normalized.StartsWith("эк", StringComparison.Ordinal))
+                            return "экзамен";
+                        if (normalized.StartsWith("за", StringComparison.Ordinal))
+                            return "зачёт";
 
                         return normalized switch
                         {
-                            "эк" => "экзамен",
                             "к" => "контрольная работа",
                             "кр" => "курсовая",
-                            "за" => "зачёт",
-                            "зао" => "зачёт с оценкой",
                             _ => value.Trim()
                         };
                     }
@@ -640,6 +748,7 @@ namespace Dekauto.Import.Service.Domain.Services
                         var evenSemester = (short)(courseNum * 2);     // 2, 4, 6, 8
 
                         var courseRowCount = courseSheet.Dimension.Rows;
+                        string? practiceSuperHeader = null;
 
                         // Строки дисциплин на листах «Курс N» начинаются с 6-й (как на ПланСвод)
                         for (int row = 6; row <= courseRowCount; row++)
@@ -648,6 +757,8 @@ namespace Dekauto.Import.Service.Domain.Services
                             var disciplineName = NormalizeDisciplineName(nameRaw);
                             if (string.IsNullOrWhiteSpace(disciplineName))
                                 continue;
+
+                            var isBoldRow = courseSheet.Cells[row, 5].Style.Font.Bold;
 
                             // Вид контроля для нечётного семестра (столбец 7)
                             var oddControlRaw = courseSheet.Cells[row, 7].Text;
@@ -661,32 +772,43 @@ namespace Dekauto.Import.Service.Domain.Services
                             var hasEvenTotalHours = TryGetIntFromCourseSheetCell(courseSheet, row, 23, out var evenTotalHours);
                             var hasEvenContactHours = TryGetIntFromCourseSheetCell(courseSheet, row, 24, out var evenContactHours);
 
-                            var isBoldRow = courseSheet.Cells[row, 5].Style.Font.Bold;
                             var hasAnyAcademicData = !string.IsNullOrWhiteSpace(oddControlType) ||
                                                      !string.IsNullOrWhiteSpace(evenControlType) ||
                                                      hasOddTotalHours || hasEvenTotalHours ||
                                                      hasOddContactHours || hasEvenContactHours;
-                            // Жирные заголовки модулей без данных пропускаем; реальные дисциплины (в т.ч. НИР) — обрабатываем
+
+                            // Жирная строка без академических данных — это заголовок:
+                            //   содержит «практик» -> надзаголовок практик (тип практики),
+                            //   иначе -> обычный заголовок модуля, сбрасываем контекст практик.
+                            // Жирные строки С данными (в т.ч. сами практики со словом «практик»
+                            // в названии) трактуем как дисциплины и не съедаем как надзаголовок.
                             if (isBoldRow && !hasAnyAcademicData)
+                            {
+                                practiceSuperHeader = disciplineName.Contains("практик", StringComparison.OrdinalIgnoreCase)
+                                    ? disciplineName
+                                    : null;
                                 continue;
+                            }
+
+                            // Составное название практики (надзаголовок + строка НИР) для нечёткого сопоставления.
+                            // Обычные дисциплины при этом по-прежнему сопоставляются точно по своему названию.
+                            string? practiceCompositeName = !string.IsNullOrWhiteSpace(practiceSuperHeader)
+                                ? $"{practiceSuperHeader}, {disciplineName}"
+                                : null;
 
                             foreach (var student in students)
                             {
-                                var targetOdd = student.DisciplineResults.FirstOrDefault(x =>
-                                    x.DisciplineName != null &&
-                                    x.Semester.HasValue &&
-                                    x.Semester.Value == oddSemester &&
-                                    NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(
-                                        NormalizeDisciplineNameForComparison(disciplineName),
-                                        StringComparison.OrdinalIgnoreCase));
+                                var targetOdd = FindPlanMatchInStatementResults(
+                                    student.DisciplineResults,
+                                    oddSemester,
+                                    disciplineName,
+                                    practiceCompositeName);
 
-                                var targetEven = student.DisciplineResults.FirstOrDefault(x =>
-                                    x.DisciplineName != null &&
-                                    x.Semester.HasValue &&
-                                    x.Semester.Value == evenSemester &&
-                                    NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(
-                                        NormalizeDisciplineNameForComparison(disciplineName),
-                                        StringComparison.OrdinalIgnoreCase));
+                                var targetEven = FindPlanMatchInStatementResults(
+                                    student.DisciplineResults,
+                                    evenSemester,
+                                    disciplineName,
+                                    practiceCompositeName);
 
                                 if (targetOdd != null && !string.IsNullOrWhiteSpace(oddControlType) &&
                                     string.IsNullOrWhiteSpace(targetOdd.ControlType))
@@ -2253,7 +2375,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     var headers = new List<string>();
                     for (int col = 1; col <= columnCount; col++)
                     {
-                        headers.Add(worksheet.Cells[1, col].Text);
+                        headers.Add(CollapseInnerWhitespace(worksheet.Cells[1, col].Text));
                     }
 
                     foreach (var student in students)
@@ -2267,7 +2389,7 @@ namespace Dekauto.Import.Service.Domain.Services
                             for (int col = 1; col <= columnCount; col++)
                             {
                                 var header = headers[col - 1];
-                                var cellValue = worksheet.Cells[row, col].Value ?? "";
+                                var cellValue = NormalizeImportCellValue(worksheet.Cells[row, col].Value);
 
                                 if (header.ToLower() == "фио студента" || header.ToLower() == "фио обучающегося" || header.ToLower() == "фио")
                                 {
@@ -2283,7 +2405,7 @@ namespace Dekauto.Import.Service.Domain.Services
                             for (int col = 1; col <= columnCount; col++)
                             {
                                 var header = headers[col - 1];
-                                var cellValue = worksheet.Cells[row, col].Value ?? "";
+                                var cellValue = NormalizeImportCellValue(worksheet.Cells[row, col].Value);
 
                                 logger.LogInformation($"Работа с ячейкой: [{col},{row}]; столбец {header}");
 
@@ -2337,7 +2459,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     var headers = new List<string>();
                     for (int col = 1; col <= columnCount; col++)
                     {
-                        headers.Add(worksheet.Cells[1, col].Text);
+                        headers.Add(CollapseInnerWhitespace(worksheet.Cells[1, col].Text));
                     }
 
                     for (int row = 2; row <= rowCount; row++)
@@ -2361,7 +2483,7 @@ namespace Dekauto.Import.Service.Domain.Services
                         for (int col = 1; col <= columnCount; col++)
                         {
                             var header = headers[col - 1];
-                            var cellValue = worksheet.Cells[row, col].Value ?? "";
+                            var cellValue = NormalizeImportCellValue(worksheet.Cells[row, col].Value);
 
                             string indexPattern = @"\b\d{6}\b";
                             string cityPattern = @"\b(?:(?<city>[\w\s]+?)\s+[гсхдп]\,?|(?<type>[гсхдп])\.?\s*(?<city>[\w\s]+?))\b";
@@ -2724,14 +2846,14 @@ namespace Dekauto.Import.Service.Domain.Services
                             {
                                 var mergedText = worksheet.Cells[mergedAddress].First().Text;
                                 if (!string.IsNullOrWhiteSpace(mergedText))
-                                    return mergedText;
+                                    return CollapseInnerWhitespace(mergedText);
                             }
 
                             var text = worksheet.Cells[row, col].Text;
                             if (!string.IsNullOrWhiteSpace(text))
-                                return text;
+                                return CollapseInnerWhitespace(text);
 
-                            return worksheet.Cells[row, col].Value?.ToString()?.Trim() ?? string.Empty;
+                            return CollapseInnerWhitespace(worksheet.Cells[row, col].Value?.ToString());
                         }
 
                         static bool TryExtractFirstInt(string? value, out int number)
@@ -2915,7 +3037,10 @@ namespace Dekauto.Import.Service.Domain.Services
 
                                 disciplineName = NormalizeHeaderText(disciplineName);
 
-                                var isCourseWork = disciplineName.ToLower().Contains("курсовая работа");
+                                if (IsNumericDisciplineHeaderName(disciplineName))
+                                    continue;
+
+                                var isCourseWork = IsStatementCourseWorkDiscipline(disciplineName);
                                 if (isCourseWork)
                                     disciplineName = string.Empty;
 
