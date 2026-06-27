@@ -79,7 +79,7 @@ namespace Dekauto.Import.Service.API.Controllers
         /// <response code="500">Внутренняя ошибка сервера</response>
         [HttpPost]
         [Route("students")]
-        [ProducesResponseType(typeof(IEnumerable<Student>), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ImportStudentsResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
         [ProducesResponseType(StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -112,12 +112,16 @@ namespace Dekauto.Import.Service.API.Controllers
                 logger.LogInformation($"Начало работы с файлом: {journal.FileName}");
                 var studentsJournal = await _importService.GetStudentsJournal(journal, (List<Domain.Entities.Student>)studentsOrder);
                 logger.LogInformation($"Начало работы с файлом: {statement.FileName}");
-                var students = await _importService.GetStudentsStatement(statement, (List<Domain.Entities.Student>)studentsJournal);
+                var statementResult = await _importService.GetStudentsStatement(statement, (List<Domain.Entities.Student>)studentsJournal);
 
                 logger.LogInformation($"Начало работы с файлом: {plan.FileName}");
-                students = await _importService.GetStudentsEducationPlan(plan, (List<Domain.Entities.Student>)students);
+                var studentsWithPlan = await _importService.GetStudentsEducationPlan(plan, statementResult.Students);
 
-                return Ok(students);
+                return Ok(new ImportStudentsResponse
+                {
+                    Students = studentsWithPlan.ToList(),
+                    ImportWarnings = statementResult.Warnings
+                });
             }
             catch (ArgumentNullException ex)
             {

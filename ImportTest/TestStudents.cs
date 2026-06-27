@@ -1,4 +1,5 @@
 ﻿using Dekauto.Import.Service.API.Controllers;
+using Dekauto.Import.Service.API.Models;
 using Dekauto.Import.Service.Domain.Entities;
 using Dekauto.Import.Service.Domain.Entities.Adapters;
 using Dekauto.Import.Service.Domain.Interfaces;
@@ -48,7 +49,8 @@ namespace ImportTest
             importService.Setup(s => s.GetStudentsLD(It.IsAny<IFormFile>())).ReturnsAsync(students);
             importService.Setup(s => s.GetStudentsContract(It.IsAny<IFormFile>(), students)).ReturnsAsync(students);
             importService.Setup(s => s.GetStudentsJournal(It.IsAny<IFormFile>(), students)).ReturnsAsync(students);
-            importService.Setup(s => s.GetStudentsStatement(It.IsAny<IFormFile>(), students)).ReturnsAsync(students);
+            importService.Setup(s => s.GetStudentsStatement(It.IsAny<IFormFile>(), students))
+                .ReturnsAsync(new StatementImportResult { Students = students, Warnings = new List<ImportWarning>() });
             importService.Setup(s => s.GetStudentsEducationPlan(It.IsAny<IFormFile>(), students)).ReturnsAsync(students);
 
             controller.ControllerContext = new ControllerContext();
@@ -63,9 +65,9 @@ namespace ImportTest
             Assert.IsNotNull(okResult);
             Assert.AreEqual(StatusCodes.Status200OK, okResult.StatusCode);
 
-            var studentResult = okResult.Value as List<Student>; // Извлечение списка студентов
-            Assert.IsNotNull(studentResult);
-            Assert.AreEqual(students.Count, studentResult.Count); // Проверка количества студентов
+            var importResult = okResult.Value as ImportStudentsResponse;
+            Assert.IsNotNull(importResult);
+            Assert.AreEqual(students.Count, importResult.Students.Count);
         }
 
         [TestMethod]

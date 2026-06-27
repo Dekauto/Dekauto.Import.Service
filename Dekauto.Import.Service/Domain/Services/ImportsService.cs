@@ -1,4 +1,5 @@
-﻿using Dekauto.Import.Service.Domain.Entities;
+﻿using Dekauto.Import.Service.API.Models;
+using Dekauto.Import.Service.Domain.Entities;
 using Dekauto.Import.Service.Domain.Entities.DTO;
 using Dekauto.Import.Service.Domain.Exceptions;
 using Dekauto.Import.Service.Domain.Interfaces;
@@ -2299,7 +2300,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                     case "№ группы":
                                     case "номер группы":
                                         if (isCurrentStudent)
-                                            student.GroupName = cellValue.ToString();
+                                            student.GroupName = cellValue.ToString()?.Trim();
                                         break;
                                 }
                             }
@@ -2605,8 +2606,10 @@ namespace Dekauto.Import.Service.Domain.Services
         }
 
         // Функция извлечения данных из ведомости
-        public async Task<IEnumerable<Student>> GetStudentsStatement(IFormFile statement, List<Student> students)
+        public async Task<StatementImportResult> GetStudentsStatement(IFormFile statement, List<Student> students)
         {
+            var importWarnings = new List<ImportWarning>();
+            var statementFileName = statement.FileName;
             // Открытие потока обмеена данных
             using (var stream = new MemoryStream())
             {
@@ -2685,19 +2688,8 @@ namespace Dekauto.Import.Service.Domain.Services
                         return double.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out score);
                     }
 
-                    static string NormalizeStatementFio(string? value)
-                    {
-                        if (string.IsNullOrWhiteSpace(value))
-                            return string.Empty;
-                        return value.ToLower().Replace(" ", string.Empty).Replace(".", string.Empty);
-                    }
-
                     static bool IsFioHeader(string? header)
-                    {
-                        if (string.IsNullOrWhiteSpace(header))
-                            return false;
-                        return header.ToLower().Contains("фио");
-                    }
+                        => StatementImportMatching.IsStatementFioHeader(header);
 
                     static string NormalizeHeaderText(string? value)
                     {
@@ -2719,6 +2711,8 @@ namespace Dekauto.Import.Service.Domain.Services
                         if (worksheet?.Dimension == null)
                             continue;
 
+                        logger.LogInformation("Ведомость: обработка листа «{Sheet}»", worksheet.Name);
+
                         // Базовые данные листов
                         var columnCount = worksheet.Dimension.Columns;
                         var rowCount = worksheet.Dimension.Rows;
@@ -2727,8 +2721,17 @@ namespace Dekauto.Import.Service.Domain.Services
                         {
                             var mergedAddress = worksheet.MergedCells[row, col];
                             if (!string.IsNullOrWhiteSpace(mergedAddress))
-                                return worksheet.Cells[mergedAddress].First().Text;
-                            return worksheet.Cells[row, col].Text;
+                            {
+                                var mergedText = worksheet.Cells[mergedAddress].First().Text;
+                                if (!string.IsNullOrWhiteSpace(mergedText))
+                                    return mergedText;
+                            }
+
+                            var text = worksheet.Cells[row, col].Text;
+                            if (!string.IsNullOrWhiteSpace(text))
+                                return text;
+
+                            return worksheet.Cells[row, col].Value?.ToString()?.Trim() ?? string.Empty;
                         }
 
                         static bool TryExtractFirstInt(string? value, out int number)
@@ -2785,66 +2788,103 @@ namespace Dekauto.Import.Service.Domain.Services
 
                         var headers = new List<string>();
                         var topHeaders = new List<string>();
+                        var bottomHeaders = new List<string>();
 
-                        // Извлечение заголовков из объединённых 6-7 строк
-                        for (int col = 1; col <= columnCount; col++)
+                        var hasHeaderLayout = StatementImportMatching.TryFindStatementHeaderLayout(
+                            columnCount,
+                            GetMergedText,
+                            NormalizeHeaderText,
+                            IsFioHeader,
+                            out _,
+                            out var headerBottomRow,
+                            out headers,
+                            out topHeaders,
+                            out bottomHeaders);
+
+                        if (!hasHeaderLayout)
                         {
-                            var top = NormalizeHeaderText(GetMergedText(6, col));
-                            var bottom = NormalizeHeaderText(GetMergedText(7, col));
-
-                            topHeaders.Add(top);
-
-                            string combined;
-                            if (string.IsNullOrWhiteSpace(top))
-                                combined = bottom;
-                            else if (string.IsNullOrWhiteSpace(bottom))
-                                combined = top;
-                            else
-                                combined = $"{top} {bottom}";
-
-                            headers.Add(NormalizeHeaderText(combined));
-                        }
-
-                        var studentRows = new Dictionary<Student, int>();
-
-                        foreach (var student in students)
-                        {
-                            // Фамилия и имя студента в таблице
-                            var surname = student.Surname ?? string.Empty;
-                            var nameInitial = string.IsNullOrWhiteSpace(student.Name) ? string.Empty : student.Name.Substring(0, 1);
-                            var patronymicInitial = string.IsNullOrWhiteSpace(student.Patronymic) ? string.Empty : student.Patronymic.Substring(0, 1);
-
-                            var keyFi = NormalizeStatementFio($"{surname}{nameInitial}");
-                            var keyFip = NormalizeStatementFio($"{surname}{nameInitial}{patronymicInitial}");
-                            // Перебор начиная с 8 строки
-                            for (int row = 8; row <= rowCount; row++)
+                            if (StatementImportMatching.ShouldWarnAboutMissingGroupOnSheet(
+                                    columnCount, rowCount, GetMergedText, hasHeaderLayout: false))
                             {
-                                // Поиск студентов из списка
-                                for (int col = 1; col <= columnCount; col++)
+                                importWarnings.Add(new ImportWarning
                                 {
-                                    var header = headers[col - 1];
-                                    var cellValue = worksheet.Cells[row, col].Value ?? "";
-
-                                    if (!IsFioHeader(header))
-                                        continue;
-
-                                    var cellfi = NormalizeStatementFio(cellValue.ToString());
-                                    if (cellfi.Contains(keyFip) || cellfi.Contains(keyFi))
-                                    {
-                                        studentRows[student] = row;
-                                        break;
-                                    }
-                                    if (studentRows.ContainsKey(student))
-                                        break;
-                                }
+                                    Code = StatementImportMatching.WarningCodeGroupNotParsed,
+                                    Message = StatementImportMatching.FormatGroupNotParsedUserMessage(),
+                                    FileName = statementFileName,
+                                    SheetName = worksheet.Name
+                                });
                             }
+                            else
+                            {
+                                logger.LogDebug(
+                                    "Ведомость: лист «{Sheet}» пропущен (не похож на лист с оценками)",
+                                    worksheet.Name);
+                            }
+
+                            continue;
                         }
 
-                        // Обработка данных для студентов
-                        foreach (var student in students)
+                        if (!StatementImportMatching.TryResolveSheetGroupRaw(
+                                columnCount,
+                                GetMergedText,
+                                worksheet.Name,
+                                students,
+                                out var sheetGroupRaw,
+                                out _))
                         {
-                            if (!studentRows.TryGetValue(student, out int studentRow))
+                            importWarnings.Add(new ImportWarning
+                            {
+                                Code = StatementImportMatching.WarningCodeGroupNotParsed,
+                                Message = StatementImportMatching.FormatGroupNotParsedUserMessage(),
+                                FileName = statementFileName,
+                                SheetName = worksheet.Name
+                            });
+                            continue;
+                        }
+
+                        var fioCol = StatementImportMatching.FindFioColumnIndex(
+                            headers, topHeaders, bottomHeaders, IsFioHeader);
+                        var studentRowStart = StatementImportMatching.FindStatementStudentRowStart(
+                            GetMergedText,
+                            fioCol,
+                            StatementImportMatching.GetStatementStudentRowStart(headerBottomRow),
+                            rowCount);
+
+                        var studentsOnSheet = StatementImportMatching.FilterStudentsForSheetGroup(students, sheetGroupRaw);
+                        if (studentsOnSheet.Count == 0)
+                        {
+                            logger.LogWarning(
+                                "Ведомость: лист «{Sheet}», группа «{Group}» — нет студентов журнала с такой группой",
+                                worksheet.Name,
+                                sheetGroupRaw);
+                            continue;
+                        }
+
+                        foreach (var student in studentsOnSheet)
+                        {
+                            var (keyFi, keyFip) = StatementImportMatching.BuildStatementStudentKeys(student);
+                            var candidates = StatementImportMatching.FindStatementFioCandidateRows(
+                                GetMergedText, fioCol, studentRowStart, rowCount, keyFi, keyFip);
+
+                            if (candidates.Count == 0)
                                 continue;
+
+                            if (candidates.Count > 1)
+                            {
+                                importWarnings.Add(new ImportWarning
+                                {
+                                    Code = StatementImportMatching.WarningCodeAmbiguousMatch,
+                                    Message = StatementImportMatching.FormatAmbiguousMatchUserMessage(),
+                                    FileName = statementFileName,
+                                    SheetName = worksheet.Name,
+                                    GroupName = sheetGroupRaw,
+                                    StudentDisplayName = StatementImportMatching.FormatStudentDisplayName(student),
+                                    MatchedRows = candidates
+                                });
+                                continue;
+                            }
+
+                            var studentRow = candidates[0];
 
                             for (int col = 1; col <= columnCount; col++)
                             {
@@ -2939,7 +2979,12 @@ namespace Dekauto.Import.Service.Domain.Services
                     }
                 }
             }
-            return students;
+
+            return new StatementImportResult
+            {
+                Students = students,
+                Warnings = importWarnings
+            };
         }
 
         public async Task<DiplomaSupplementData> GetStudentCardAsync(IFormFile studentCard, IFormFile plan)
