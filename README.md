@@ -16,6 +16,7 @@
 | Дата | Изменение |
 |------|-----------|
 | 2026-06-28 | Parity с DekautoDesktop 1.16.10: DIP-06c gate «Ро…», PLAN-01 docs (`ImportFilesAdapter`, README) |
+| 2026-06-28 | `ParseFinalizationData`: в `DisciplineName` только тема ВКР (без префикса); parity DekautoDesktop 1.16.13 |
 
 ## 🛠 Технологии
 

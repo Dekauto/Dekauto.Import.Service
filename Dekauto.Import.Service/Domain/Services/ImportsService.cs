@@ -3492,14 +3492,9 @@ namespace Dekauto.Import.Service.Domain.Services
                     topicClean = "Тема выпускной квалификационной работы";
                 }
 
-                // Формируем имя ВКР. 
-                // Вариант: "Выпускная квалификационная работа (бакалаврская работа). Тема: \"...\""
-                // Чтобы экспорт мог корректно разбить это на строки.
-                string vkrName = $"Выпускная квалификационная работа. Тема: \"{topicClean}\"";
-
                 var vkr = new StudentDisciplineResult
                 {
-                    DisciplineName = vkrName,
+                    DisciplineName = topicClean,
                     Score = MapGradeTo15Scale(vkrScoreRaw),
                     ControlType = "защита вкр",
                     CreditUnits = 0,
@@ -3508,7 +3503,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     Semester = null
                 };
                 results.Add(vkr);
-                logger.LogDebug($"Добавлена ВКР: {vkrName}, Оценка: {vkr.Score}");
+                logger.LogDebug($"Добавлена ВКР: {topicClean}, Оценка: {vkr.Score}");
             }
 
             return results;
