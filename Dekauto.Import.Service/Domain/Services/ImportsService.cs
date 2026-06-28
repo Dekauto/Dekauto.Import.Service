@@ -2791,7 +2791,15 @@ namespace Dekauto.Import.Service.Domain.Services
                                     courseOfTraining = Regex.Match(cellValue.ToString(), numConcursPattern).Groups[1].ToString().Trim();
                                     break;
                                 case "направление\\специальность":
-                                    student.CourseOfTraining = $"{courseOfTraining} {cellValue.ToString()}";
+                                    {
+                                        var dirValue = cellValue.ToString()?.Trim() ?? "";
+                                        if (Regex.IsMatch(dirValue, numConcursPattern))
+                                            student.CourseOfTraining = dirValue;
+                                        else if (!string.IsNullOrEmpty(courseOfTraining))
+                                            student.CourseOfTraining = $"{courseOfTraining} {dirValue}".Trim();
+                                        else
+                                            student.CourseOfTraining = dirValue;
+                                    }
                                     break;
                                 case "серия документа об образовании":
                                     student.EducationReceivedSerial = cellValue.ToString();
@@ -3259,9 +3267,8 @@ namespace Dekauto.Import.Service.Domain.Services
                     // Начальный скан документа (Лист 1)
                     var firstSheet = package.Workbook.Worksheets[0] ?? throw new InvalidOperationException("Загруженный файл не содержит листов");
                     var infoSheet = package.Workbook.Worksheets["ОбщСведения"] ?? firstSheet;
-                    var courseText = infoSheet.Cells[78, 3].Text?.Trim();
-                    if (!string.IsNullOrWhiteSpace(courseText))
-                        diplomaData.CourseOfTraining = courseText;
+                    var courseText = ReadSupplementSheetTextCell(infoSheet.Cells[78, 3]);
+                    diplomaData.CourseOfTraining = ResolveSupplementCourseOfTraining(package.Workbook.Worksheets, courseText);
 
                     var qualFromC110 = NormalizeSupplementOpopSheetText(infoSheet.Cells[110, 3].Text);
                     if (!string.IsNullOrWhiteSpace(qualFromC110))
@@ -3346,6 +3353,61 @@ namespace Dekauto.Import.Service.Domain.Services
             if (s.Length >= 2 && s.StartsWith('"') && s.EndsWith('"'))
                 s = s.Substring(1, s.Length - 2).Trim();
             return string.IsNullOrWhiteSpace(s) ? null : s;
+        }
+
+        private static readonly Regex SupplementSpecialtyCodePattern = new(
+            @"\b(\d{2}\.\d{2}\.\d{2})\b",
+            RegexOptions.CultureInvariant);
+
+        internal static string? ResolveSupplementCourseOfTraining(ExcelWorksheets worksheets, string? fromC78)
+        {
+            var text = CollapseInnerWhitespace(fromC78 ?? "").Trim();
+            if (SupplementSpecialtyCodePattern.IsMatch(text))
+                return string.IsNullOrWhiteSpace(text) ? null : text;
+
+            var refSheet = worksheets["Справочник"];
+            if (refSheet != null)
+            {
+                var refText = CollapseInnerWhitespace(ReadSupplementSheetTextCell(refSheet.Cells[3, 3]) ?? "").Trim();
+                if (SupplementSpecialtyCodePattern.IsMatch(refText))
+                {
+                    if (string.IsNullOrWhiteSpace(text))
+                        return refText;
+                    return MergeSupplementSpecialtyCodeWithName(refText, text);
+                }
+            }
+
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+
+        internal static string MergeSupplementSpecialtyCodeWithName(string referenceWithCode, string namePart)
+        {
+            var codeMatch = SupplementSpecialtyCodePattern.Match(referenceWithCode);
+            if (!codeMatch.Success)
+                return namePart.Trim();
+
+            var code = codeMatch.Groups[1].Value;
+            var name = namePart.Trim();
+            if (name.StartsWith(code, StringComparison.Ordinal))
+                return name;
+
+            if (string.IsNullOrEmpty(name))
+            {
+                var refTail = referenceWithCode.Substring(codeMatch.Index + codeMatch.Length).Trim();
+                return string.IsNullOrWhiteSpace(refTail) ? code : $"{code} {refTail}".Trim();
+            }
+
+            return $"{code} {name}".Trim();
+        }
+
+        private static string? ReadSupplementSheetTextCell(ExcelRange cell)
+        {
+            var fromValue = cell.Value?.ToString()?.Trim();
+            if (!string.IsNullOrWhiteSpace(fromValue))
+                return CollapseInnerWhitespace(fromValue);
+
+            var t = cell.Text?.Trim();
+            return string.IsNullOrWhiteSpace(t) ? null : CollapseInnerWhitespace(t);
         }
 
         private static string? BuildSupplementStudyFormLine(string? rawFromCard)
