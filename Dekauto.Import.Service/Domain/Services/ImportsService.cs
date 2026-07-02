@@ -1,4 +1,4 @@
-﻿using Dekauto.Import.Service.API.Models;
+using Dekauto.Import.Service.API.Models;
 using Dekauto.Import.Service.Domain.Entities;
 using Dekauto.Import.Service.Domain.Entities.DTO;
 using Dekauto.Import.Service.Domain.Exceptions;
@@ -255,109 +255,6 @@ namespace Dekauto.Import.Service.Domain.Services
                    || lower.Contains("курсовой проект", StringComparison.Ordinal);
         }
 
-        /// <summary>Порог нечёткого сравнения для практик (составное название из плана короче, чем в ведомости).</summary>
-        private const double PlanPracticeFuzzySimilarityThreshold = 0.6;
-
-        /// <summary>Минимальная длина короткой строки, при которой допускаем префиксное совпадение практик.</summary>
-        private const int PlanPracticePrefixMinLength = 20;
-
-        /// <summary>
-        /// Оценка совпадения составного названия практики из плана и названия практики из ведомости.
-        /// Префиксное совпадение (одно начинается с другого) трактуется как точное.
-        /// </summary>
-        private static double PracticePlanNameScore(string planComposite, string? statementName)
-        {
-            if (string.IsNullOrWhiteSpace(statementName))
-                return 0d;
-
-            var a = NormalizeDisciplineName(planComposite).ToLowerInvariant();
-            var b = NormalizeDisciplineName(statementName).ToLowerInvariant();
-            if (a.Length == 0 || b.Length == 0)
-                return 0d;
-
-            var shorter = a.Length <= b.Length ? a : b;
-            var longer = a.Length <= b.Length ? b : a;
-            if (shorter.Length >= PlanPracticePrefixMinLength && longer.StartsWith(shorter, StringComparison.Ordinal))
-                return 1d;
-
-            return DisciplineNameSimilarityRatio(planComposite, statementName);
-        }
-
-        private static StudentDisciplineResult? FindPlanMatchInStatementResults(
-            IReadOnlyList<StudentDisciplineResult> results,
-            short semester,
-            string disciplineName,
-            string? practiceCompositeName)
-        {
-            var candidates = results.Where(x =>
-                x.DisciplineName != null &&
-                x.Semester.HasValue &&
-                x.Semester.Value == semester &&
-                !string.Equals(x.ControlType, "курсовая", StringComparison.OrdinalIgnoreCase)).ToList();
-
-            // 1) Обычное точное сопоставление по нормализованному названию (как для обычных дисциплин).
-            var planKey = NormalizeDisciplineNameForComparison(disciplineName);
-            var exact = candidates.FirstOrDefault(x =>
-                NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(
-                    planKey,
-                    StringComparison.OrdinalIgnoreCase));
-            if (exact != null)
-                return exact;
-
-            // 2) Для практик — нечёткое сопоставление по составному названию (надзаголовок + НИР),
-            //    только против практик ведомости, чтобы не задевать обычные дисциплины.
-            if (!string.IsNullOrWhiteSpace(practiceCompositeName))
-            {
-                StudentDisciplineResult? bestPractice = null;
-                var bestPracticeScore = 0d;
-                foreach (var candidate in candidates)
-                {
-                    if (!string.Equals(candidate.ControlType, "практика", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    var score = PracticePlanNameScore(practiceCompositeName, candidate.DisciplineName);
-                    if (score >= PlanPracticeFuzzySimilarityThreshold && score > bestPracticeScore)
-                    {
-                        bestPracticeScore = score;
-                        bestPractice = candidate;
-                    }
-                }
-
-                if (bestPractice != null)
-                    return bestPractice;
-            }
-
-            // Для обычных дисциплин НЕ используем нечёткое сопоставление: данные с опечаткой
-            // в названии не должны попадать в карточку. Такие дисциплины помечаются «ТРЕБУЕТ ПРОВЕРКИ»
-            // отдельным проходом после сопоставления плана.
-            return null;
-        }
-
-        private const string ManualReviewDisciplineTail = " (ТРЕБУЕТ ПРОВЕРКИ)";
-
-        private static bool IsPracticeOrCourseWorkResult(StudentDisciplineResult result)
-        {
-            return string.Equals(result.ControlType, "практика", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(result.ControlType, "курсовая", StringComparison.OrdinalIgnoreCase);
-        }
-
-        /// <summary>
-        /// Помечает дисциплину как требующую ручной проверки: дописывает «(ТРЕБУЕТ ПРОВЕРКИ)» к названию
-        /// (поле сохраняется в БД и попадает в карточку, флаг RequiresManualValidation в БД не хранится).
-        /// </summary>
-        private static void MarkDisciplineNeedsReview(StudentDisciplineResult result)
-        {
-            result.RequiresManualValidation = true;
-
-            var name = result.DisciplineName ?? string.Empty;
-            if (name.Contains("ТРЕБУЕТ ПРОВЕРКИ", StringComparison.OrdinalIgnoreCase))
-                return;
-
-            result.DisciplineName = string.IsNullOrWhiteSpace(name)
-                ? "(ТРЕБУЕТ ПРОВЕРКИ)"
-                : name + ManualReviewDisciplineTail;
-        }
-
         private static string NormalizeDisciplineNameForComparison(string? value)
         {
             if (string.IsNullOrWhiteSpace(value))
@@ -396,81 +293,6 @@ namespace Dekauto.Import.Service.Domain.Services
             normalized = Regex.Replace(normalized, @"\s*\([^)]*\)", string.Empty).Trim();
 
             return normalized;
-        }
-
-        /// <summary>Заголовок типа практики в плане («Учебная практика», «Производственная практика» и т.п.).</summary>
-        private static bool IsPracticeCategoryHeader(string? disciplineName)
-        {
-            var n = NormalizeDisciplineName(disciplineName);
-            if (string.IsNullOrWhiteSpace(n))
-                return false;
-
-            return Regex.IsMatch(
-                n,
-                @"^(Учебная|Производственная|Преддипломная)\s+практика\s*$",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        }
-
-        private static string? FirstNonEmptyControlType(string? primary, string? fallback)
-        {
-            if (!string.IsNullOrWhiteSpace(primary))
-                return primary;
-            return string.IsNullOrWhiteSpace(fallback) ? null : fallback;
-        }
-
-        /// <summary>
-        /// Переносит форму аттестации и часы со строки плана в результат ведомости.
-        /// Если в «своём» семестре ячейки пусты — берёт данные из соседнего семестра той же строки.
-        /// </summary>
-        private static void ApplyPlanRowAcademicData(
-            StudentDisciplineResult? target,
-            bool preferOddSemester,
-            string? oddControlType,
-            string? evenControlType,
-            bool hasOddTotalHours,
-            int oddTotalHours,
-            bool hasEvenTotalHours,
-            int evenTotalHours,
-            bool hasOddContactHours,
-            int oddContactHours,
-            bool hasEvenContactHours,
-            int evenContactHours)
-        {
-            if (target == null)
-                return;
-
-            if (string.IsNullOrWhiteSpace(target.ControlType))
-            {
-                var controlType = preferOddSemester
-                    ? FirstNonEmptyControlType(oddControlType, evenControlType)
-                    : FirstNonEmptyControlType(evenControlType, oddControlType);
-                if (!string.IsNullOrWhiteSpace(controlType))
-                    target.ControlType = controlType;
-            }
-
-            if (!target.TotalHours.HasValue)
-            {
-                if (preferOddSemester && hasOddTotalHours)
-                    target.TotalHours = oddTotalHours;
-                else if (!preferOddSemester && hasEvenTotalHours)
-                    target.TotalHours = evenTotalHours;
-                else if (hasOddTotalHours)
-                    target.TotalHours = oddTotalHours;
-                else if (hasEvenTotalHours)
-                    target.TotalHours = evenTotalHours;
-            }
-
-            if (!target.AudHours.HasValue)
-            {
-                if (preferOddSemester && hasOddContactHours)
-                    target.AudHours = oddContactHours;
-                else if (!preferOddSemester && hasEvenContactHours)
-                    target.AudHours = evenContactHours;
-                else if (hasOddContactHours)
-                    target.AudHours = oddContactHours;
-                else if (hasEvenContactHours)
-                    target.AudHours = evenContactHours;
-            }
         }
 
         /// <summary>Первая строка ячейки кода индекса (в планах часто многострочный текст с переносами).</summary>
@@ -842,9 +664,7 @@ namespace Dekauto.Import.Service.Domain.Services
                         };
                     }
 
-                    // Дисциплины, для которых нашлось чёткое совпадение с планом (или практика по составному
-                    // названию). Остальные обычные дисциплины пометим «ТРЕБУЕТ ПРОВЕРКИ» после прохода.
-                    var planMatchedResults = new HashSet<StudentDisciplineResult>();
+                    var catalog = new List<PlanDisciplineCatalogEntry>();
 
                     var courseSheets = new[] { "Курс 1", "Курс 2", "Курс 3", "Курс 4" };
                     for (int courseIndex = 0; courseIndex < courseSheets.Length; courseIndex++)
@@ -887,15 +707,12 @@ namespace Dekauto.Import.Service.Domain.Services
                                                      hasOddTotalHours || hasEvenTotalHours ||
                                                      hasOddContactHours || hasEvenContactHours;
 
-                            // Заголовок типа практики («Учебная практика» и т.п.) — всегда надзаголовок,
-                            // даже если в строке есть часы из объединённых ячеек.
-                            if (IsPracticeCategoryHeader(disciplineName))
+                            if (StatementPlanReconciliation.IsPracticeCategoryHeader(disciplineName))
                             {
                                 practiceSuperHeader = disciplineName;
                                 continue;
                             }
 
-                            // Жирная строка без академических данных — заголовок модуля или типа практики.
                             if (isBoldRow && !hasAnyAcademicData)
                             {
                                 practiceSuperHeader = disciplineName.Contains("практик", StringComparison.OrdinalIgnoreCase)
@@ -904,77 +721,47 @@ namespace Dekauto.Import.Service.Domain.Services
                                 continue;
                             }
 
-                            // Составное название практики (надзаголовок + строка НИР) для нечёткого сопоставления.
-                            // Обычные дисциплины при этом по-прежнему сопоставляются точно по своему названию.
-                            string? practiceCompositeName = !string.IsNullOrWhiteSpace(practiceSuperHeader)
-                                ? $"{practiceSuperHeader}, {disciplineName}"
-                                : null;
+                            var isPracticeRow = !string.IsNullOrWhiteSpace(practiceSuperHeader);
+                            var displayName = isPracticeRow
+                                ? StatementPlanReconciliation.FormatPracticeDisplayName(practiceSuperHeader!, disciplineName)
+                                : disciplineName;
 
-                            foreach (var student in students)
+                            var hasOddSide = !string.IsNullOrWhiteSpace(oddControlType) ||
+                                             hasOddTotalHours || hasOddContactHours;
+                            var hasEvenSide = !string.IsNullOrWhiteSpace(evenControlType) ||
+                                              hasEvenTotalHours || hasEvenContactHours;
+
+                            if (hasOddSide)
                             {
-                                var targetOdd = FindPlanMatchInStatementResults(
-                                    student.DisciplineResults,
-                                    oddSemester,
-                                    disciplineName,
-                                    practiceCompositeName);
+                                catalog.Add(new PlanDisciplineCatalogEntry
+                                {
+                                    Semester = oddSemester,
+                                    PlanName = disciplineName,
+                                    DisplayName = displayName,
+                                    IsPractice = isPracticeRow,
+                                    ControlType = string.IsNullOrWhiteSpace(oddControlType) ? null : oddControlType,
+                                    TotalHours = hasOddTotalHours ? oddTotalHours : null,
+                                    AudHours = hasOddContactHours ? oddContactHours : null
+                                });
+                            }
 
-                                var targetEven = FindPlanMatchInStatementResults(
-                                    student.DisciplineResults,
-                                    evenSemester,
-                                    disciplineName,
-                                    practiceCompositeName);
-
-                                if (targetOdd != null)
-                                    planMatchedResults.Add(targetOdd);
-                                if (targetEven != null)
-                                    planMatchedResults.Add(targetEven);
-
-                                ApplyPlanRowAcademicData(
-                                    targetOdd,
-                                    preferOddSemester: true,
-                                    oddControlType,
-                                    evenControlType,
-                                    hasOddTotalHours,
-                                    oddTotalHours,
-                                    hasEvenTotalHours,
-                                    evenTotalHours,
-                                    hasOddContactHours,
-                                    oddContactHours,
-                                    hasEvenContactHours,
-                                    evenContactHours);
-
-                                ApplyPlanRowAcademicData(
-                                    targetEven,
-                                    preferOddSemester: false,
-                                    oddControlType,
-                                    evenControlType,
-                                    hasOddTotalHours,
-                                    oddTotalHours,
-                                    hasEvenTotalHours,
-                                    evenTotalHours,
-                                    hasOddContactHours,
-                                    oddContactHours,
-                                    hasEvenContactHours,
-                                    evenContactHours);
+                            if (hasEvenSide)
+                            {
+                                catalog.Add(new PlanDisciplineCatalogEntry
+                                {
+                                    Semester = evenSemester,
+                                    PlanName = disciplineName,
+                                    DisplayName = displayName,
+                                    IsPractice = isPracticeRow,
+                                    ControlType = string.IsNullOrWhiteSpace(evenControlType) ? null : evenControlType,
+                                    TotalHours = hasEvenTotalHours ? evenTotalHours : null,
+                                    AudHours = hasEvenContactHours ? evenContactHours : null
+                                });
                             }
                         }
                     }
 
-                    // Обычные дисциплины без чёткого совпадения с планом (например, опечатка в названии
-                    // в ведомости) — данные не заполняем, помечаем «ТРЕБУЕТ ПРОВЕРКИ». Практики и курсовые
-                    // исключаем (у них своя логика сопоставления).
-                    foreach (var student in students)
-                    {
-                        foreach (var discipline in student.DisciplineResults)
-                        {
-                            if (IsPracticeOrCourseWorkResult(discipline))
-                                continue;
-                            if (planMatchedResults.Contains(discipline))
-                                continue;
-
-                            MarkDisciplineNeedsReview(discipline);
-                        }
-                    }
+                    StatementPlanReconciliation.ReconcileStudentsWithPlan(students, catalog);
                 }
             }
 
@@ -3175,17 +2962,7 @@ namespace Dekauto.Import.Service.Domain.Services
                                 if (isCourseWork)
                                     disciplineName = string.Empty;
 
-                                // Обработка практик: "Учебная практика, ..." или "Производственная практика, ..."
-                                var isPractice = false;
-                                var productionPracticeMatch = Regex.Match(disciplineName, @"^Производственная практика,", RegexOptions.IgnoreCase);
-                                var studyPracticeMatch = Regex.Match(disciplineName, @"^Учебная практика,", RegexOptions.IgnoreCase);
-                                
-                                if (productionPracticeMatch.Success || studyPracticeMatch.Success)
-                                {
-                                    isPractice = true;
-                                    // Для практик НЕ убирается префикс, название остается как есть
-                                    // Но при сравнении будет использоваться NormalizeDisciplineNameForComparison
-                                }
+                                var isPractice = StatementPlanReconciliation.IsStatementPracticeDiscipline(disciplineName);
 
                                 if (!isCourseWork && !isPractice)
                                 {
@@ -3195,40 +2972,29 @@ namespace Dekauto.Import.Service.Domain.Services
 
                                 logger.LogInformation($"Работа с ячейкой: [{col},{studentRow}]; столбец {headerLower}");
 
-                                var existing = isCourseWork
-                                    ? student.DisciplineResults.FirstOrDefault(x =>
-                                        x.ControlType != null &&
-                                        x.ControlType.Equals("курсовая", StringComparison.OrdinalIgnoreCase))
-                                    : isPractice
-                                        ? student.DisciplineResults.FirstOrDefault(x =>
-                                            x.DisciplineName != null &&
-                                            x.ControlType != null &&
-                                            x.ControlType.Equals("практика", StringComparison.OrdinalIgnoreCase) &&
-                                            NormalizeDisciplineNameForComparison(x.DisciplineName).Equals(NormalizeDisciplineNameForComparison(disciplineName), StringComparison.OrdinalIgnoreCase))
-                                        : student.DisciplineResults.FirstOrDefault(x =>
-                                            x.DisciplineName != null &&
-                                            x.DisciplineName.Equals(disciplineName, StringComparison.OrdinalIgnoreCase));
-
-                                string? controlType = isCourseWork ? "курсовая" : isPractice ? "практика" : null;
-
-                                if (existing == null)
+                                var snapshot = new StatementDisciplineSnapshot
                                 {
-                                    student.DisciplineResults.Add(new StudentDisciplineResult
-                                    {
-                                        DisciplineName = string.IsNullOrWhiteSpace(disciplineName) ? null : disciplineName,
-                                        Score = score.ToString(),
-                                        Semester = sheetSemester,
-                                        Year = sheetYear,
-                                        ControlType = controlType
-                                    });
-                                }
-                                else
+                                    StatementName = disciplineName,
+                                    Score = score.ToString(),
+                                    Semester = sheetSemester,
+                                    Year = sheetYear,
+                                    IsCourseWork = isCourseWork,
+                                    IsPractice = isPractice,
+                                    SourceFileName = statementFileName,
+                                    SourceSheetName = worksheet.Name
+                                };
+
+                                var hadExisting = student.PendingStatementDisciplines
+                                    .Any(s => s.MergeKey == snapshot.MergeKey);
+                                StatementPlanReconciliation.UpsertSnapshot(student.PendingStatementDisciplines, snapshot);
+                                if (hadExisting)
                                 {
-                                    existing.Score = score.ToString();
-                                    existing.Semester = sheetSemester;
-                                    existing.Year = sheetYear;
-                                    if (controlType != null)
-                                        existing.ControlType = controlType;
+                                    logger.LogWarning(
+                                        "Конфликт ведомости: «{Discipline}», семестр {Semester}, студент {Student} — данные из «{File}» заменяют предыдущие.",
+                                        string.IsNullOrWhiteSpace(disciplineName) ? "(курсовая)" : disciplineName,
+                                        sheetSemester,
+                                        StatementImportMatching.FormatStudentDisplayName(student),
+                                        statementFileName);
                                 }
                             }
                         }

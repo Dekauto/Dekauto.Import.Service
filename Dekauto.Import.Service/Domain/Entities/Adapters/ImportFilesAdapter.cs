@@ -1,4 +1,4 @@
-﻿namespace Dekauto.Import.Service.Domain.Entities.Adapters
+namespace Dekauto.Import.Service.Domain.Entities.Adapters
 {
     /// <summary>
     /// Адаптер для передачи файлов Excel в контроллер импорта
@@ -54,6 +54,9 @@
         /// - Типы контроля (экзамен, зачет, курсовая работа, практика)
         /// </remarks>
         public IFormFile? statement { get; set; }
+
+        /// <summary>Несколько файлов ведомости за один импорт.</summary>
+        public List<IFormFile>? statements { get; set; }
 
         /// <summary>
         /// Файл учебного плана (Учебный план)

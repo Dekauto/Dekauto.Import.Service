@@ -1,4 +1,4 @@
-﻿namespace Dekauto.Import.Service.Domain.Entities
+namespace Dekauto.Import.Service.Domain.Entities
 {
     public class Student
     {
@@ -77,5 +77,8 @@
         public DateOnly? EducationRelationDate { get; set; } // Дата начала отношений с учебным заведением +
 
         public List<StudentDisciplineResult> DisciplineResults { get; set; } = new(); // Список дисциплин +
+
+        /// <summary>Снимки дисциплин из ведомости до сопоставления с планом (не сохраняется в БД).</summary>
+        public List<StatementDisciplineSnapshot> PendingStatementDisciplines { get; set; } = new();
     }
 }

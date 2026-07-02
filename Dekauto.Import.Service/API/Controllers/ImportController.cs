@@ -1,4 +1,4 @@
-﻿using Dekauto.Import.Service.API.Models;
+using Dekauto.Import.Service.API.Models;
 using Dekauto.Import.Service.Domain.Entities;
 using Dekauto.Import.Service.Domain.Entities.Adapters;
 using Dekauto.Import.Service.Domain.Exceptions;
@@ -91,19 +91,19 @@ namespace Dekauto.Import.Service.API.Controllers
                 var ld = files.ld;
                 var contract = files.contract;
                 var journal = files.journal;
-                var statement = files.statement;
                 var plan = files.plan;
+                var statementFiles = ResolveStatementFiles(files);
 
                 if (ld == null || ld.Length == 0 ||
                     contract == null || contract.Length == 0 ||
                     journal == null || journal.Length == 0 ||
-                    statement == null || statement.Length == 0 ||
+                    statementFiles.Count == 0 ||
                     plan == null || plan.Length == 0) throw new ArgumentNullException("Файл не найден");
                 if (!IsValidExcelFile(ld) ||
                     !IsValidExcelFile(contract) || 
                     !IsValidExcelFile(journal) ||
-                    !IsValidExcelFile(statement) ||
-                    !IsValidExcelFile(plan)) throw new FileLoadException(
+                    !IsValidExcelFile(plan) ||
+                    statementFiles.Any(f => !IsValidExcelFile(f))) throw new FileLoadException(
                     "Неподдерживаемый формат файла. Пожалуйста, загрузите файл в формате .xlsx/.xlsm");
                 logger.LogInformation($"Начало работы с файлом: {ld.FileName}");
                 var studentsLD = await _importService.GetStudentsLD(ld);
@@ -111,11 +111,19 @@ namespace Dekauto.Import.Service.API.Controllers
                 var studentsOrder = await _importService.GetStudentsContract(contract, (List<Domain.Entities.Student>)studentsLD);
                 logger.LogInformation($"Начало работы с файлом: {journal.FileName}");
                 var studentsJournal = await _importService.GetStudentsJournal(journal, (List<Domain.Entities.Student>)studentsOrder);
-                logger.LogInformation($"Начало работы с файлом: {statement.FileName}");
-                var statementResult = await _importService.GetStudentsStatement(statement, (List<Domain.Entities.Student>)studentsJournal);
+
+                StatementImportResult? statementResult = null;
+                foreach (var statementFile in statementFiles)
+                {
+                    logger.LogInformation($"Начало работы с файлом ведомости: {statementFile.FileName}");
+                    var fileResult = await _importService.GetStudentsStatement(
+                        statementFile,
+                        (List<Domain.Entities.Student>)studentsJournal);
+                    statementResult = MergeStatementImportResults(statementResult, fileResult);
+                }
 
                 logger.LogInformation($"Начало работы с файлом: {plan.FileName}");
-                var studentsWithPlan = await _importService.GetStudentsEducationPlan(plan, statementResult.Students);
+                var studentsWithPlan = await _importService.GetStudentsEducationPlan(plan, statementResult!.Students);
 
                 return Ok(new ImportStudentsResponse
                 {
@@ -215,6 +223,41 @@ namespace Dekauto.Import.Service.API.Controllers
                 logger.LogError(ex.Message);
                 return StatusCode(500, "Ошибка на стороне сервера, обратитесь к администратору");
             }
+        }
+
+        private static List<IFormFile> ResolveStatementFiles(ImportFilesAdapter files)
+        {
+            var result = new List<IFormFile>();
+            if (files.statements != null)
+            {
+                result.AddRange(files.statements.Where(f => f != null && f.Length > 0));
+            }
+
+            if (result.Count == 0 && files.statement != null && files.statement.Length > 0)
+            {
+                result.Add(files.statement);
+            }
+
+            return result;
+        }
+
+        private StatementImportResult MergeStatementImportResults(
+            StatementImportResult? accumulated,
+            StatementImportResult current)
+        {
+            if (accumulated == null)
+            {
+                return current;
+            }
+
+            var mergedWarnings = new List<ImportWarning>(accumulated.Warnings);
+            mergedWarnings.AddRange(current.Warnings);
+
+            return new StatementImportResult
+            {
+                Students = current.Students,
+                Warnings = mergedWarnings
+            };
         }
     }
 }
