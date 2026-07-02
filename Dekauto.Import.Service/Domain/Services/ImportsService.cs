@@ -2578,7 +2578,15 @@ namespace Dekauto.Import.Service.Domain.Services
                                     courseOfTraining = Regex.Match(cellValue.ToString(), numConcursPattern).Groups[1].ToString().Trim();
                                     break;
                                 case "направление\\специальность":
-                                    student.CourseOfTraining = $"{courseOfTraining} {cellValue.ToString()}";
+                                    {
+                                        var dirValue = cellValue.ToString()?.Trim() ?? "";
+                                        if (Regex.IsMatch(dirValue, numConcursPattern))
+                                            student.CourseOfTraining = dirValue;
+                                        else if (!string.IsNullOrEmpty(courseOfTraining))
+                                            student.CourseOfTraining = $"{courseOfTraining} {dirValue}".Trim();
+                                        else
+                                            student.CourseOfTraining = dirValue;
+                                    }
                                     break;
                                 case "серия документа об образовании":
                                     student.EducationReceivedSerial = cellValue.ToString();
@@ -3025,9 +3033,8 @@ namespace Dekauto.Import.Service.Domain.Services
                     // Начальный скан документа (Лист 1)
                     var firstSheet = package.Workbook.Worksheets[0] ?? throw new InvalidOperationException("Загруженный файл не содержит листов");
                     var infoSheet = package.Workbook.Worksheets["ОбщСведения"] ?? firstSheet;
-                    var courseText = infoSheet.Cells[78, 3].Text?.Trim();
-                    if (!string.IsNullOrWhiteSpace(courseText))
-                        diplomaData.CourseOfTraining = courseText;
+                    var courseText = ReadSupplementSheetTextCell(infoSheet.Cells[78, 3]);
+                    diplomaData.CourseOfTraining = ResolveSupplementCourseOfTraining(package.Workbook.Worksheets, courseText);
 
                     var qualFromC110 = NormalizeSupplementOpopSheetText(infoSheet.Cells[110, 3].Text);
                     if (!string.IsNullOrWhiteSpace(qualFromC110))
@@ -3114,6 +3121,61 @@ namespace Dekauto.Import.Service.Domain.Services
             return string.IsNullOrWhiteSpace(s) ? null : s;
         }
 
+        private static readonly Regex SupplementSpecialtyCodePattern = new(
+            @"\b(\d{2}\.\d{2}\.\d{2})\b",
+            RegexOptions.CultureInvariant);
+
+        internal static string? ResolveSupplementCourseOfTraining(ExcelWorksheets worksheets, string? fromC78)
+        {
+            var text = CollapseInnerWhitespace(fromC78 ?? "").Trim();
+            if (SupplementSpecialtyCodePattern.IsMatch(text))
+                return string.IsNullOrWhiteSpace(text) ? null : text;
+
+            var refSheet = worksheets["Справочник"];
+            if (refSheet != null)
+            {
+                var refText = CollapseInnerWhitespace(ReadSupplementSheetTextCell(refSheet.Cells[3, 3]) ?? "").Trim();
+                if (SupplementSpecialtyCodePattern.IsMatch(refText))
+                {
+                    if (string.IsNullOrWhiteSpace(text))
+                        return refText;
+                    return MergeSupplementSpecialtyCodeWithName(refText, text);
+                }
+            }
+
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+
+        internal static string MergeSupplementSpecialtyCodeWithName(string referenceWithCode, string namePart)
+        {
+            var codeMatch = SupplementSpecialtyCodePattern.Match(referenceWithCode);
+            if (!codeMatch.Success)
+                return namePart.Trim();
+
+            var code = codeMatch.Groups[1].Value;
+            var name = namePart.Trim();
+            if (name.StartsWith(code, StringComparison.Ordinal))
+                return name;
+
+            if (string.IsNullOrEmpty(name))
+            {
+                var refTail = referenceWithCode.Substring(codeMatch.Index + codeMatch.Length).Trim();
+                return string.IsNullOrWhiteSpace(refTail) ? code : $"{code} {refTail}".Trim();
+            }
+
+            return $"{code} {name}".Trim();
+        }
+
+        private static string? ReadSupplementSheetTextCell(ExcelRange cell)
+        {
+            var fromValue = cell.Value?.ToString()?.Trim();
+            if (!string.IsNullOrWhiteSpace(fromValue))
+                return CollapseInnerWhitespace(fromValue);
+
+            var t = cell.Text?.Trim();
+            return string.IsNullOrWhiteSpace(t) ? null : CollapseInnerWhitespace(t);
+        }
+
         private static string? BuildSupplementStudyFormLine(string? rawFromCard)
         {
             if (string.IsNullOrWhiteSpace(rawFromCard))
@@ -3196,14 +3258,9 @@ namespace Dekauto.Import.Service.Domain.Services
                     topicClean = "Тема выпускной квалификационной работы";
                 }
 
-                // Формируем имя ВКР. 
-                // Вариант: "Выпускная квалификационная работа (бакалаврская работа). Тема: \"...\""
-                // Чтобы экспорт мог корректно разбить это на строки.
-                string vkrName = $"Выпускная квалификационная работа. Тема: \"{topicClean}\"";
-
                 var vkr = new StudentDisciplineResult
                 {
-                    DisciplineName = vkrName,
+                    DisciplineName = topicClean,
                     Score = MapGradeTo15Scale(vkrScoreRaw),
                     ControlType = "защита вкр",
                     CreditUnits = 0,
@@ -3212,7 +3269,7 @@ namespace Dekauto.Import.Service.Domain.Services
                     Semester = null
                 };
                 results.Add(vkr);
-                logger.LogDebug($"Добавлена ВКР: {vkrName}, Оценка: {vkr.Score}");
+                logger.LogDebug($"Добавлена ВКР: {topicClean}, Оценка: {vkr.Score}");
             }
 
             return results;
@@ -3284,6 +3341,56 @@ namespace Dekauto.Import.Service.Domain.Services
             return (finalResults, withHonors);
         }
 
+        private static bool EducationResultsCellShowsDataLikeEpPlus(OfficeOpenXml.ExcelRange cell)
+        {
+            if (cell.Value is not null)
+                return true;
+            var t = cell.Text?.Replace('\u00A0', ' ').Trim();
+            return !string.IsNullOrEmpty(t);
+        }
+
+        private static bool EducationResultsOrdinalColumnPassesForRow(ExcelWorksheet sheet, int row, int col)
+        {
+            var cell = sheet.Cells[row, col];
+            if (cell.Value is not null && EducationResultsOrdinalLooksLikeImportsService(cell.Value))
+                return true;
+            var fmt = cell.Text?.Replace('\u00A0', ' ').Trim() ?? string.Empty;
+            return EducationResultsOrdinalLooksLikeImportsService(fmt);
+        }
+
+        private static bool EducationResultsOrdinalLooksLikeImportsService(object? value)
+        {
+            if (value is null)
+                return false;
+            switch (value)
+            {
+                case int:
+                case long:
+                case short:
+                    return true;
+                case float f:
+                    return Math.Abs(f - MathF.Round(f)) < 1e-5f;
+                case double d:
+                    return Math.Abs(d - Math.Round(d, 9)) < 1e-9;
+                case decimal dec:
+                {
+                    var r = decimal.Round(dec, 0);
+                    return Math.Abs(dec - r) < 1e-9m;
+                }
+                default:
+                {
+                    var s = value.ToString()?.Replace('\u00A0', ' ').Trim().Replace(" ", string.Empty)
+                        ?? string.Empty;
+                    if (string.IsNullOrEmpty(s))
+                        return false;
+                    var norm = s.Replace(',', '.');
+                    if (double.TryParse(norm, NumberStyles.Any, CultureInfo.InvariantCulture, out var num))
+                        return Math.Abs(num - Math.Round(num, 9)) < 1e-9 && num >= -0.001;
+                    return false;
+                }
+            }
+        }
+
         private List<StudentDisciplineResult> ParseEducationResultsWorksheet(ExcelWorksheet sheet)
         {
             logger.LogDebug($"Начало парсинга листа: {sheet.Name}");
@@ -3303,17 +3410,28 @@ namespace Dekauto.Import.Service.Domain.Services
                 if (semesterVal != null) short.TryParse(semesterVal.ToString(), out semester);
 
                 row += 1;
-                while (sheet.Cells[row, col].Value is null) row++;
+                while (!EducationResultsCellShowsDataLikeEpPlus(sheet.Cells[row, col]))
+                    row++;
 
-                // --- 1. Обычные дисциплины ---
-                while (sheet.Cells[row, col].Value is not null &&
-                       sheet.Cells[row, col + 1].Value is not null &&
-                       int.TryParse(sheet.Cells[row, col].Value.ToString(), out _))
+                var gateGuard = 0;
+                while (gateGuard++ < 200 &&
+                       row <= sheet.Dimension.End.Row &&
+                       !(EducationResultsCellShowsDataLikeEpPlus(sheet.Cells[row, col]) &&
+                         EducationResultsCellShowsDataLikeEpPlus(sheet.Cells[row, col + 1]) &&
+                         EducationResultsOrdinalColumnPassesForRow(sheet, row, col)))
+                {
+                    row++;
+                }
+
+                while (EducationResultsCellShowsDataLikeEpPlus(sheet.Cells[row, col]) &&
+                       EducationResultsCellShowsDataLikeEpPlus(sheet.Cells[row, col + 1]) &&
+                       EducationResultsOrdinalColumnPassesForRow(sheet, row, col))
                 {
                     var result = new StudentDisciplineResult();
                     result.DisciplineName = sheet.Cells[row, col + 1].Text.Trim();
-                    result.CreditUnits = sheet.Cells[row, col + 2].GetValue<double?>() ?? 0;
-                    result.AudHours = sheet.Cells[row, col + 3].GetValue<double?>() ?? 0;
+                    result.CreditUnits = TryGetCardCellDouble(sheet.Cells[row, col + 2].Value) ?? 0;
+                    result.TotalHours = TryGetCardCellDouble(sheet.Cells[row, col + 3].Value);
+                    result.AudHours = TryGetCardCellDouble(sheet.Cells[row, col + 4].Value) ?? 0;
                     result.ControlType = sheet.Cells[row, col + 6].Text.Trim();
                     result.Score = sheet.Cells[row, col + 7].Text.Trim();
 
@@ -3407,6 +3525,33 @@ namespace Dekauto.Import.Service.Domain.Services
             }
 
             return results;
+        }
+
+        internal static double? TryGetCardCellDouble(object? value)
+        {
+            if (value is null)
+                return null;
+
+            if (value is double d)
+                return d;
+            if (value is float f)
+                return f;
+            if (value is decimal dec)
+                return (double)dec;
+            if (value is int i)
+                return i;
+            if (value is long l)
+                return l;
+
+            var str = value.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(str))
+                return null;
+
+            str = str.Replace(" ", string.Empty).Replace(",", ".");
+            if (double.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+                return parsed;
+
+            return null;
         }
 
         private bool CalculateDiplomaWithHonors(List<StudentDisciplineResult> disciplineResults)
